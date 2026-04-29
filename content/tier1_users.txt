@@ -1,0 +1,7 @@
+# Tier-1 country users to follow/unfollow throughout the day
+# One username per line (no @ symbol)
+# These will be followed in batches and unfollowed after ~2 hours
+#
+# Example:
+# someuser123
+# anotheruser456

@@ -1,0 +1,4 @@
+Add your text posts here — one per line.
+Each post will be picked randomly during posting cycles.
+Delete this line and replace with your actual content.
+Make sure you have at least 4 posts so each cycle can pick 4 unique ones.

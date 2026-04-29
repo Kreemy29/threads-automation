@@ -1,0 +1,8 @@
+selenium
+webdriver-manager
+python-dotenv
+requests
+Pillow
+pyperclip
+pyautogui
+customtkinter
