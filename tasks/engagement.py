@@ -24,17 +24,18 @@ from config import (
     OUTREACH_COMMENTS_MAX,
     FOLLOW_BATCH_SIZE,
     UNFOLLOW_AFTER_SECONDS,
+    GEMINI_API_KEY,
 )
 
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), "..", "content")
-DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # American name filter
 # ──────────────────────────────────────────────────────────────────────────────
 
-def filter_american_names(names: list[str], api_key: str) -> list[str]:
+def filter_american_names(names, api_key: str) -> list:
     """
     Send a batch of display names / handles to DeepSeek and return only those
     that are likely American. Falls back to returning all names if API fails.
@@ -54,18 +55,17 @@ def filter_american_names(names: list[str], api_key: str) -> list[str]:
 
     try:
         resp = _requests.post(
-            DEEPSEEK_URL,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            GEMINI_URL,
+            params={"key": api_key},
+            headers={"Content-Type": "application/json"},
             json={
-                "model": "deepseek-chat",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 300,
-                "temperature": 0.2,
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": 300, "temperature": 0.2},
             },
             timeout=20,
         )
         resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         # Parse returned names — strip bullets/dashes
         filtered = [
             line.lstrip("-• ").strip()
@@ -80,7 +80,7 @@ def filter_american_names(names: list[str], api_key: str) -> list[str]:
         return names  # on any error, don't filter
 
 
-def _extract_commenter_names(bot) -> list[tuple[str, str]]:
+def _extract_commenter_names(bot) -> list:
     """
     Returns list of (display_name, username) from visible comments on the current page.
     """
@@ -160,41 +160,38 @@ def _extract_post_context(bot) -> str:
         return ""
 
 
-def _generate_ai_comment(api_key: str, context: str) -> str | None:
-    """Call DeepSeek to generate a short, natural comment based on post context."""
+def _generate_ai_comment(api_key: str, context: str):
+    """Call Gemini to generate a short, natural comment based on post context."""
     if not api_key or not context:
         return None
 
-    system = (
+    prompt = (
         "You are a real girl on social media leaving short, genuine comments on posts. "
         "Keep it 1 sentence max, casual and human. Use 1 emoji if it fits naturally. "
         "No hashtags. No 'as an AI'. Never mention you're a bot. "
-        "ONLY output the comment itself, nothing else."
-    )
-    user = (
+        "ONLY output the comment itself, nothing else.\n\n"
         f"Here is the post and some comments:\n\n{context}\n\n"
         "Write ONE short, natural reply comment."
     )
 
     try:
         resp = _requests.post(
-            DEEPSEEK_URL,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            GEMINI_URL,
+            params={"key": api_key},
+            headers={"Content-Type": "application/json"},
             json={
-                "model": "deepseek-chat",
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": user},
-                ],
-                "max_tokens": 60,
-                "temperature": 0.85,
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "maxOutputTokens": 80,
+                    "temperature": 0.9,
+                },
             },
             timeout=25,
         )
         resp.raise_for_status()
-        comment = resp.json()["choices"][0]["message"]["content"].strip()
+        comment = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-        # Strip surrounding quotes if LLM added them
+        # Strip surrounding quotes if model added them
         comment = comment.strip('"').strip("'")
 
         # If model returned multiple options separated by "or", take first
@@ -203,7 +200,7 @@ def _generate_ai_comment(api_key: str, context: str) -> str | None:
             comment = or_match.group(1).strip()
 
         return comment
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -211,8 +208,10 @@ def _generate_ai_comment(api_key: str, context: str) -> str | None:
 # Outreach comments
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_outreach_comments(bot, already_done_today: int, api_key: str = ""):
+def run_outreach_comments(bot, already_done_today: int, api_key: str = None):
     log = bot.log
+    if api_key is None:
+        api_key = GEMINI_API_KEY  # use Gemini by default
     target_count = random.randint(OUTREACH_COMMENTS_MIN, OUTREACH_COMMENTS_MAX)
     remaining = target_count - already_done_today
     if remaining <= 0:
@@ -283,7 +282,7 @@ def _follow_american_commenters(bot, post_url: str, api_key: str, log):
             log.warning(f"[{bot.username}] Could not follow @{username}: {e}")
 
 
-def _get_recent_post_url(bot, profile_url: str) -> str | None:
+def _get_recent_post_url(bot, profile_url: str):
     bot.go(profile_url)
     time.sleep(2)
     try:
@@ -367,38 +366,45 @@ def _post_comment_on(bot, post_url: str, api_key: str, fallback_comments: list) 
         log.warning(f"[{bot.username}] Could not type comment")
         return False
 
+    # Fire React input event so the Post button becomes enabled
+    try:
+        bot.driver.execute_script(
+            "arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true}));",
+            textbox
+        )
+    except Exception:
+        pass
+
     time.sleep(random.uniform(1.5, 3))
     return _click_comment_post_button(bot, textbox)
 
 
 def _click_comment_post_button(bot, textbox) -> bool:
     """Multi-strategy Post button click for comment dialogs."""
-    for btn_text in ["Post", "Reply", "Share", "Send", "Comment"]:
-        for xpath in [
-            f"//div[text()='{btn_text}' or ./span[text()='{btn_text}']]",
-            f"//button[text()='{btn_text}' or ./span[text()='{btn_text}']]",
-            f"//div[contains(text(),'{btn_text}')][@role='button']",
-        ]:
-            try:
-                btns = bot.driver.find_elements(By.XPATH, xpath)
-                for b in btns:
-                    if b.is_displayed() and b.is_enabled():
-                        b.click()
-                        time.sleep(3)
-                        bot.log.info(f"[{bot.username}] Comment submitted")
-                        return True
-            except Exception:
-                continue
 
-    # JS fallback
+    # Wait up to 5s for a non-disabled Post/Reply button to appear
+    try:
+        btn = WebDriverWait(bot.driver, 5).until(lambda d: _find_enabled_submit_btn(d))
+        btn.click()
+        time.sleep(3)
+        bot.log.info(f"[{bot.username}] Comment submitted")
+        return True
+    except Exception:
+        pass
+
+    # JS fallback — also checks aria-label for icon-only buttons
     try:
         result = bot.driver.execute_script("""
+            const labels = ['post','reply','share','send','comment'];
             const els = document.querySelectorAll('div[role="button"], button');
             for (const el of els) {
-                const t = el.textContent.trim().toLowerCase();
-                if (['post','reply','share','send','comment'].includes(t) &&
-                    el.getAttribute('aria-disabled') !== 'true' &&
-                    el.offsetWidth > 0) {
+                const t = (el.textContent || '').trim().toLowerCase();
+                const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                const disabled = el.getAttribute('aria-disabled') === 'true'
+                               || el.disabled
+                               || el.classList.contains('disabled');
+                if (!disabled && el.offsetWidth > 0 &&
+                    (labels.includes(t) || labels.some(l => label.includes(l)))) {
                     el.click(); return true;
                 }
             }
@@ -406,22 +412,41 @@ def _click_comment_post_button(bot, textbox) -> bool:
         """)
         if result:
             time.sleep(3)
+            bot.log.info(f"[{bot.username}] Comment submitted via JS")
             return True
     except Exception:
         pass
 
     # Enter key last resort
     try:
-        bot.driver.execute_script("""
-            arguments[0].dispatchEvent(new KeyboardEvent('keydown',
-                {key:'Enter',code:'Enter',keyCode:13,bubbles:true,cancelable:true}));
-        """, textbox)
+        ActionChains(bot.driver).move_to_element(textbox).click().send_keys(Keys.RETURN).perform()
         time.sleep(2)
+        bot.log.info(f"[{bot.username}] Comment submitted via Enter key")
         return True
     except Exception:
         pass
 
+    bot.log.warning(f"[{bot.username}] Could not find submit button for comment")
     return False
+
+
+def _find_enabled_submit_btn(driver):
+    labels = ["post", "reply", "share", "send", "comment"]
+    els = driver.find_elements(By.XPATH, '//*[@role="button" or self::button]')
+    for el in els:
+        try:
+            if not el.is_displayed():
+                continue
+            text = (el.text or "").strip().lower()
+            aria = (el.get_attribute("aria-label") or "").lower()
+            disabled = el.get_attribute("aria-disabled") == "true"
+            if disabled:
+                continue
+            if any(l == text or l in aria for l in labels):
+                return el
+        except Exception:
+            continue
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -62,6 +62,18 @@ def init_db():
         );
     """)
     conn.commit()
+
+    # ── migrations: add columns that may not exist in older DBs ──
+    for col, definition in [
+        ("media_folder", "TEXT DEFAULT ''"),
+        ("follow_list",  "TEXT DEFAULT ''"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE accounts ADD COLUMN {col} {definition}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
     conn.close()
 
 
@@ -101,11 +113,22 @@ def load_accounts_from_file(filepath):
 def get_pending_accounts(limit):
     conn = _connect()
     rows = conn.execute(
-        "SELECT * FROM accounts WHERE state IN ('pending','error') ORDER BY created_at LIMIT ?",
+        "SELECT * FROM accounts WHERE state IN ('pending','setup','warmup','error','active') ORDER BY created_at LIMIT ?",
         (limit,),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def reset_running_accounts():
+    """Reset accounts stuck at 'running' from a previous crash back to 'error'."""
+    conn = _connect()
+    conn.execute(
+        "UPDATE accounts SET state='error', notes='reset from stuck running state' "
+        "WHERE state='running'"
+    )
+    conn.commit()
+    conn.close()
 
 
 def get_account(username):
@@ -167,7 +190,7 @@ def mark_unfollowed(follow_id):
     conn.close()
 
 
-def save_follow_list(name: str, handles: list[str]):
+def save_follow_list(name: str, handles: list):
     conn = _connect()
     conn.execute(
         "INSERT INTO follow_lists (name, handles) VALUES (?, ?) "
@@ -178,7 +201,7 @@ def save_follow_list(name: str, handles: list[str]):
     conn.close()
 
 
-def get_follow_list(name: str) -> list[str]:
+def get_follow_list(name: str) -> list:
     conn = _connect()
     row = conn.execute("SELECT handles FROM follow_lists WHERE name=?", (name,)).fetchone()
     conn.close()
@@ -187,7 +210,7 @@ def get_follow_list(name: str) -> list[str]:
     return [h for h in row["handles"].splitlines() if h.strip()]
 
 
-def list_follow_lists() -> list[str]:
+def list_follow_lists() -> list:
     conn = _connect()
     rows = conn.execute("SELECT name FROM follow_lists ORDER BY name").fetchall()
     conn.close()

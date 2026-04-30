@@ -71,7 +71,7 @@ def _load_tier1_users():
 # Main worker entry point
 # ------------------------------------------------------------------
 
-def run_account(username, adspower_id):
+def run_account(username, adspower_id, state=None):
     """Full lifecycle for one account. Called in a child process."""
     log = _make_logger(username)
     log.info(f"Worker started — username={username}, adspower_id={adspower_id}")
@@ -86,8 +86,11 @@ def run_account(username, adspower_id):
             db.update_account(username, state="error", notes="not logged in")
             return
 
-        account = db.get_account(username)
-        state = account["state"]
+        # Use state passed by coordinator (pre-"running"), fall back to DB read
+        if state is None or state == "running":
+            account = db.get_account(username)
+            state = account.get("state", "pending")
+        log.info(f"Account state: {state}")
 
         # ── SETUP ────────────────────────────────────────────────────
         if state == "pending":
@@ -140,7 +143,13 @@ def run_account(username, adspower_id):
         log.info("Interrupted by user")
     except Exception as e:
         log.exception(f"Fatal error: {e}")
-        db.update_account(username, state="error", notes=str(e))
+        err = str(e).lower()
+        # Permanent failures — don't retry automatically
+        if "profile not found" in err or "does not exist" in err:
+            db.update_account(username, state="invalid", notes=str(e))
+            log.error(f"Marked {username} as invalid — fix AdsPower profile ID in accounts.txt")
+        else:
+            db.update_account(username, state="error", notes=str(e))
         db.log_action(username, "worker", "error", str(e))
     finally:
         try:
@@ -188,10 +197,8 @@ def _run_active_loop(bot, username, log, media_folder: str = ""):
 
         # ── Outreach comments ──────────────────────────────────────
         if now >= next_comment_time:
-            import config as _cfg
             daily = db.get_daily_counts(username)
-            done = run_outreach_comments(bot, daily["comments"],
-                                         api_key=getattr(_cfg, "DEEPSEEK_API_KEY", ""))
+            done = run_outreach_comments(bot, daily["comments"])  # uses GEMINI_API_KEY from config
             log.info(f"Outreach: {done} comments posted today total")
             next_comment_time = _random_comment_time()
 

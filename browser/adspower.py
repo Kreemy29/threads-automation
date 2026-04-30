@@ -31,13 +31,17 @@ class AdsPowerManager:
                     ws = data["data"]["ws"]
                     selenium_address = ws.get("selenium")
                     debug_port = data["data"].get("debugging_port")
+                    webdriver_path = data["data"].get("webdriver", "")
                     if not selenium_address:
                         raise RuntimeError("No selenium address in AdsPower response")
                     self._log.info(f"[AdsPower] Browser started for {user_id}: {selenium_address}")
-                    return selenium_address, debug_port
+                    return selenium_address, debug_port, webdriver_path
                 else:
                     msg = data.get("msg", "unknown error")
                     self._log.warning(f"[AdsPower] Start failed (attempt {attempt+1}): {msg}")
+                    # Profile doesn't exist — no point retrying
+                    if "not exist" in msg.lower() or "does not exist" in msg.lower():
+                        raise RuntimeError(f"AdsPower profile not found for user_id={user_id}: {msg}")
                     time.sleep(3)
             except requests.RequestException as e:
                 self._log.warning(f"[AdsPower] Request error (attempt {attempt+1}): {e}")

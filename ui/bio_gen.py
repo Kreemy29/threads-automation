@@ -9,7 +9,7 @@ DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
 
 
-def generate_bios(api_key: str, niche: str, count: int = 15) -> list[str]:
+def generate_bios(api_key: str, niche: str, count: int = 15) -> list:
     """
     Generate `count` unique bio variations for the given niche.
     Returns a list of bio strings.

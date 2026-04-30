@@ -78,7 +78,7 @@ class SectionLabel(ctk.CTkLabel):
 class AccountsTab(ctk.CTkFrame):
     def __init__(self, parent):
         super().__init__(parent, fg_color=BG_PANEL)
-        self._rows: list[dict] = []
+        self._rows = []
         self._build()
         self._load_from_file()
 
@@ -299,7 +299,7 @@ class AccountsTab(ctk.CTkFrame):
                 r["status"] = status
                 break
 
-    def get_accounts(self) -> list[dict]:
+    def get_accounts(self) -> list:
         return [{"username": r["username"], "adspower_id": r["adspower_id"],
                  "media_folder": r.get("media_folder", ""),
                  "follow_list": r.get("follow_list", "")} for r in self._rows]
@@ -447,8 +447,29 @@ class SettingsTab(ctk.CTkFrame):
         scroll.grid_columnconfigure(0, weight=1)
         scroll.grid_columnconfigure(1, weight=1)
 
-        # ── left: posting ──
-        self._card(left, "Posting").pack(fill="x", pady=(0, 8))
+        # ── left: warmup ──
+        self._card(left, "Warmup").pack(fill="x", pady=(0, 0))
+        warm_card = self._card(left, "")
+        warm_card.pack(fill="x", pady=(0, 8))
+
+        self.warmup_duration  = IntEntry(warm_card, "Warmup duration (minutes)", "60")
+        self.warmup_duration.pack(fill="x", padx=12, pady=4)
+
+        self.warmup_targets   = LabeledEntry(warm_card, "Warmup targets (comma-separated @handles)", "", width=300)
+        self.warmup_targets.pack(fill="x", padx=12, pady=4)
+
+        likes_row_w = ctk.CTkFrame(warm_card, fg_color="transparent")
+        likes_row_w.pack(fill="x", padx=12, pady=4)
+        self.warmup_likes_min = IntEntry(likes_row_w, "Likes per visit MIN", "2", width=90)
+        self.warmup_likes_min.pack(side="left", padx=(0, 8))
+        self.warmup_likes_max = IntEntry(likes_row_w, "Likes per visit MAX", "6", width=90)
+        self.warmup_likes_max.pack(side="left")
+
+        self.warmup_max_follows = IntEntry(warm_card, "Max follows per warmup session", "8")
+        self.warmup_max_follows.pack(fill="x", padx=12, pady=4)
+
+        # ── left: active process ──
+        self._card(left, "Active Process").pack(fill="x", pady=(8, 0))
         post_card = self._card(left, "")
         post_card.pack(fill="x", pady=(0, 8))
 
@@ -468,16 +489,12 @@ class SettingsTab(ctk.CTkFrame):
                      font=("Segoe UI", 11)).pack(side="left")
         ctk.CTkSwitch(img_row, text="", variable=self.image_post_var).pack(side="right")
 
-        # ── left: warmup ──
-        self._card(left, "Warmup").pack(fill="x", pady=(8, 0))
-        warm_card = self._card(left, "")
-        warm_card.pack(fill="x", pady=(0, 8))
-
-        self.warmup_duration  = IntEntry(warm_card, "Warmup duration (minutes)", "60")
-        self.warmup_duration.pack(fill="x", padx=12, pady=4)
-
-        self.warmup_targets   = LabeledEntry(warm_card, "Warmup targets (comma-separated @handles)", "", width=300)
-        self.warmup_targets.pack(fill="x", padx=12, pady=4)
+        likes_row_a = ctk.CTkFrame(post_card, fg_color="transparent")
+        likes_row_a.pack(fill="x", padx=12, pady=4)
+        self.active_likes_min = IntEntry(likes_row_a, "Likes per scroll MIN", "1", width=90)
+        self.active_likes_min.pack(side="left", padx=(0, 8))
+        self.active_likes_max = IntEntry(likes_row_a, "Likes per scroll MAX", "5", width=90)
+        self.active_likes_max.pack(side="left")
 
         # ── right: engagement ──
         self._card(right, "Engagement").pack(fill="x", pady=(0, 8))
@@ -513,8 +530,8 @@ class SettingsTab(ctk.CTkFrame):
         self.adspower_api_key = LabeledEntry(gen_card, "AdsPower API Key", "", width=300)
         self.adspower_api_key.pack(fill="x", padx=12, pady=4)
 
-        self.deepseek_key     = LabeledEntry(gen_card, "DeepSeek API Key", "", width=300)
-        self.deepseek_key.pack(fill="x", padx=12, pady=(4, 12))
+        self.gemini_key       = LabeledEntry(gen_card, "Gemini API Key", "", width=300)
+        self.gemini_key.pack(fill="x", padx=12, pady=(4, 12))
 
     def _card(self, parent, title):
         f = ctk.CTkFrame(parent, fg_color=BG_CARD, corner_radius=8)
@@ -527,21 +544,26 @@ class SettingsTab(ctk.CTkFrame):
 
     def _to_dict(self) -> dict:
         return {
-            "text_posts":       self.text_posts.get(),
-            "cycle_min":        self.cycle_min.get(),
-            "cycle_max":        self.cycle_max.get(),
-            "image_post":       self.image_post_var.get(),
-            "warmup_duration":  self.warmup_duration.get(),
-            "warmup_targets":   self.warmup_targets.get(),
-            "comments_min":     self.comments_min.get(),
-            "comments_max":     self.comments_max.get(),
-            "follow_batch":     self.follow_batch.get(),
-            "unfollow_hours":   self.unfollow_hours.get(),
-            "outreach_targets": self.outreach_targets.get(),
-            "batch_size":         self.batch_size.get(),
-            "mother_post_url":    self.mother_post_url.get(),
-            "adspower_api_key":   self.adspower_api_key.get(),
-            "deepseek_key":       self.deepseek_key.get(),
+            "text_posts":           self.text_posts.get(),
+            "cycle_min":            self.cycle_min.get(),
+            "cycle_max":            self.cycle_max.get(),
+            "image_post":           self.image_post_var.get(),
+            "active_likes_min":     self.active_likes_min.get(),
+            "active_likes_max":     self.active_likes_max.get(),
+            "warmup_duration":      self.warmup_duration.get(),
+            "warmup_targets":       self.warmup_targets.get(),
+            "warmup_likes_min":     self.warmup_likes_min.get(),
+            "warmup_likes_max":     self.warmup_likes_max.get(),
+            "warmup_max_follows":   self.warmup_max_follows.get(),
+            "comments_min":         self.comments_min.get(),
+            "comments_max":         self.comments_max.get(),
+            "follow_batch":         self.follow_batch.get(),
+            "unfollow_hours":       self.unfollow_hours.get(),
+            "outreach_targets":     self.outreach_targets.get(),
+            "batch_size":           self.batch_size.get(),
+            "mother_post_url":      self.mother_post_url.get(),
+            "adspower_api_key":     self.adspower_api_key.get(),
+            "gemini_key":           self.gemini_key.get(),
         }
 
     def _from_dict(self, d: dict):
@@ -549,8 +571,13 @@ class SettingsTab(ctk.CTkFrame):
         self.cycle_min.set(d.get("cycle_min", 30))
         self.cycle_max.set(d.get("cycle_max", 60))
         self.image_post_var.set(d.get("image_post", True))
+        self.active_likes_min.set(d.get("active_likes_min", 1))
+        self.active_likes_max.set(d.get("active_likes_max", 5))
         self.warmup_duration.set(d.get("warmup_duration", 60))
         self.warmup_targets.set(d.get("warmup_targets", ""))
+        self.warmup_likes_min.set(d.get("warmup_likes_min", 2))
+        self.warmup_likes_max.set(d.get("warmup_likes_max", 6))
+        self.warmup_max_follows.set(d.get("warmup_max_follows", 8))
         self.comments_min.set(d.get("comments_min", 2))
         self.comments_max.set(d.get("comments_max", 4))
         self.follow_batch.set(d.get("follow_batch", 20))
@@ -559,7 +586,7 @@ class SettingsTab(ctk.CTkFrame):
         self.batch_size.set(d.get("batch_size", 15))
         self.mother_post_url.set(d.get("mother_post_url", ""))
         self.adspower_api_key.set(d.get("adspower_api_key", ""))
-        self.deepseek_key.set(d.get("deepseek_key", ""))
+        self.gemini_key.set(d.get("gemini_key", d.get("deepseek_key", "")))
 
     def _save_preset(self):
         name = self._preset_name.get().strip() or "default"
@@ -648,10 +675,10 @@ class BioGenTab(ctk.CTkFrame):
             side="right", padx=4, pady=6)
 
     def _generate(self):
-        api_key = self._settings.get_settings().get("deepseek_key", "").strip()
+        api_key = self._settings.get_settings().get("gemini_key", "").strip()
         if not api_key:
             messagebox.showwarning("API Key missing",
-                                   "Enter your DeepSeek API key in the Settings tab first.")
+                                   "Enter your Gemini API key in the Settings tab first.")
             return
 
         niche = self._niche.get().strip()
@@ -918,17 +945,22 @@ class App(ctk.CTk):
 
     def _apply_settings(self, s: dict):
         import config
-        config.POST_CYCLE_MIN        = s["cycle_min"] * 60
-        config.POST_CYCLE_MAX        = s["cycle_max"] * 60
-        config.OUTREACH_COMMENTS_MIN = s["comments_min"]
-        config.OUTREACH_COMMENTS_MAX = s["comments_max"]
-        config.FOLLOW_BATCH_SIZE     = s["follow_batch"]
-        config.UNFOLLOW_AFTER_SECONDS= s["unfollow_hours"] * 3600
-        config.WARMUP_DURATION       = s["warmup_duration"] * 60
-        config.MOTHER_POST_URL       = s["mother_post_url"]
-        config.BATCH_SIZE            = s["batch_size"]
-        config.ADSPOWER_API_KEY      = s.get("adspower_api_key", "")
-        config.DEEPSEEK_API_KEY      = s.get("deepseek_key", "")
+        config.POST_CYCLE_MIN          = s["cycle_min"] * 60
+        config.POST_CYCLE_MAX          = s["cycle_max"] * 60
+        config.OUTREACH_COMMENTS_MIN   = s["comments_min"]
+        config.OUTREACH_COMMENTS_MAX   = s["comments_max"]
+        config.FOLLOW_BATCH_SIZE       = s["follow_batch"]
+        config.UNFOLLOW_AFTER_SECONDS  = s["unfollow_hours"] * 3600
+        config.WARMUP_DURATION         = s["warmup_duration"] * 60
+        config.WARMUP_LIKES_MIN        = s.get("warmup_likes_min", 2)
+        config.WARMUP_LIKES_MAX        = s.get("warmup_likes_max", 6)
+        config.WARMUP_MAX_FOLLOWS      = s.get("warmup_max_follows", 8)
+        config.ACTIVE_LIKES_MIN        = s.get("active_likes_min", 1)
+        config.ACTIVE_LIKES_MAX        = s.get("active_likes_max", 5)
+        config.MOTHER_POST_URL         = s["mother_post_url"]
+        config.BATCH_SIZE              = s["batch_size"]
+        config.ADSPOWER_API_KEY        = s.get("adspower_api_key", "")
+        config.GEMINI_API_KEY          = s.get("gemini_key", "")
 
         raw_warmup = [h.strip().lstrip("@") for h in s["warmup_targets"].split(",") if h.strip()]
         if raw_warmup:

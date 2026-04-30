@@ -15,10 +15,24 @@ from selenium.webdriver.common.keys import Keys
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), "..", "content")
 
 
+_PLACEHOLDER_MARKERS = (
+    "add your", "replace with", "delete this", "make sure you have",
+    "each post will", "one per line", "posting cycles",
+)
+
 def _load_lines(filename):
     path = os.path.join(CONTENT_DIR, filename)
     with open(path, "r", encoding="utf-8") as f:
-        return [line.strip() for line in f if line.strip()]
+        lines = []
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            low = line.lower()
+            if any(marker in low for marker in _PLACEHOLDER_MARKERS):
+                continue  # skip template/instruction lines
+            lines.append(line)
+    return lines
 
 
 def _pick_image(media_folder: str = "") -> str:

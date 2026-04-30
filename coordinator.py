@@ -37,6 +37,7 @@ class Coordinator:
     def run(self):
         db.init_db()
         db.load_accounts_from_file(self.accounts_file)
+        db.reset_running_accounts()  # recover from previous crash
 
         log.info(f"Accounts loaded. Batch size: {self.batch_size}")
 
@@ -71,6 +72,7 @@ class Coordinator:
         for account in pending:
             username = account["username"]
             adspower_id = account["adspower_id"]
+            original_state = account["state"]
 
             if username in self.active:
                 continue
@@ -78,7 +80,7 @@ class Coordinator:
             log.info(f"Starting worker for @{username}")
             p = multiprocessing.Process(
                 target=run_account,
-                args=(username, adspower_id),
+                args=(username, adspower_id, original_state),
                 name=f"worker-{username}",
                 daemon=True,
             )
@@ -93,7 +95,16 @@ class Coordinator:
             p = self.active.pop(username)
             exit_code = p.exitcode
             log.info(f"Worker @{username} finished (exit code {exit_code})")
-            if exit_code != 0:
+            account = db.get_account(username)
+            current_state = account["state"] if account else "unknown"
+            # Never overwrite terminal states the worker set intentionally
+            if current_state == "invalid":
+                pass
+            elif current_state == "running":
+                # Worker exited without updating state itself
+                note = f"process exited with code {exit_code}" if exit_code != 0 else "worker exited without updating state"
+                db.update_account(username, state="error", notes=note)
+            elif exit_code != 0:
                 db.update_account(username, state="error",
                                   notes=f"process exited with code {exit_code}")
 
