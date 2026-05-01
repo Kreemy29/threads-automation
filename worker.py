@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 import data.db as db
 from config import (
+    GEMINI_API_KEY,
     POST_CYCLE_MIN,
     POST_CYCLE_MAX,
     OUTREACH_COMMENTS_MIN,
@@ -26,8 +27,8 @@ from config import (
 )
 from core.bot import ThreadsBot
 from tasks.setup import run_setup
-from tasks.warmup import run_warmup
-from tasks.posting import run_posting_cycle
+from tasks.warmup import run_warmup, _new_mood
+from tasks.posting import run_posting_cycle, post_text, post_image, _load_lines, _generate_post
 from tasks.engagement import run_outreach_comments, run_follow_batch, run_due_unfollows
 from tasks.telegram_task import run_mother_repost
 
@@ -133,7 +134,6 @@ def run_account(username, adspower_id, state=None):
             if remaining > 0:
                 log.info(f"Warmup — {remaining/60:.0f} min remaining, "
                          f"follow list: '{follow_list_name}' ({len(follow_list)} handles)")
-                from tasks.warmup import run_warmup
                 run_warmup(bot, follow_list=follow_list or None)
             else:
                 log.info("Warmup already completed")
@@ -163,8 +163,8 @@ def run_account(username, adspower_id, state=None):
     finally:
         try:
             bot.close_browser()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug(f"close_browser failed: {e}")
         log.info("Worker finished")
 
 
@@ -178,10 +178,17 @@ def _run_active_loop(bot, username, log, media_folder: str = ""):
 
     # Repost/quote the mother's post once, then pin it
     if not account.get("telegram_posted"):
-        ok = run_mother_repost(bot)
-        db.update_account(username, telegram_posted=1 if ok else 0,
-                          telegram_pinned=1 if ok else 0)
-        db.log_action(username, "mother_repost", "ok" if ok else "failed")
+        posted, pinned = run_mother_repost(bot)
+        db.update_account(username,
+                          telegram_posted=1 if posted else 0,
+                          telegram_pinned=1 if pinned else 0)
+        if posted and pinned:
+            status = "ok"
+        elif posted:
+            status = "posted_not_pinned"
+        else:
+            status = "failed"
+        db.log_action(username, "mother_repost", status)
         time.sleep(random.uniform(30, 60))
 
     next_post_time       = datetime.utcnow()
@@ -271,30 +278,25 @@ def _log_step(log, username, step, ok):
 
 
 def _post_one_text(bot, media_folder):
-    from tasks.posting import post_text, _load_lines, _generate_post
-    from config import GEMINI_API_KEY
-    import os, random as _r
-    examples = _load_lines(os.path.join(
-        os.path.dirname(__file__), "content", "text_posts.txt"
-    ))
+    examples = _load_lines("text_posts.txt")
     if not examples:
         return False
-    example = _r.choice(examples)
+    example = random.choice(examples)
     text = _generate_post(GEMINI_API_KEY, example) or example
     return post_text(bot, text)
 
 
 def _post_one_image(bot, media_folder):
-    from tasks.posting import post_image
     try:
         return post_image(bot, media_folder=media_folder)
-    except Exception:
+    except Exception as e:
+        # Surface upload/compose failures instead of silently returning False.
+        bot.log.warning(f"[{bot.username}] image post raised: {e}")
         return False
 
 
 def _active_browse(bot, username, log, seconds=60):
     """Short mood-based feed browse used between active SOP actions."""
-    from tasks.warmup import _new_mood
     mood = _new_mood()
     log.info(f"[{username}]   browsing feed ({mood['name']} mood, {seconds}s)")
     end = time.time() + seconds
@@ -308,8 +310,10 @@ def _active_browse(bot, username, log, seconds=60):
                 time.sleep(random.uniform(mood["read_min"], mood["read_max"]))
             else:
                 time.sleep(random.uniform(mood["gap_min"], mood["gap_max"]))
-    except Exception:
-        pass
+    except Exception as e:
+        # The active loop continues either way, but a silent except masked
+        # browser-died scenarios that should fail the worker fast.
+        log.warning(f"[{username}]   _active_browse aborted: {e}")
 
 
 def _random_comment_time():
@@ -320,12 +324,11 @@ def _random_comment_time():
 
 def _idle_scroll(bot, seconds=60):
     """Light scrolling to keep the session alive between tasks."""
-    import time as _time
-    end = _time.time() + seconds
+    end = time.time() + seconds
     bot.go_home()
-    while _time.time() < end:
+    while time.time() < end:
         bot.scroll_down(random.randint(300, 800))
-        _time.sleep(random.uniform(1.5, 4))
+        time.sleep(random.uniform(1.5, 4))
 
 
 # ------------------------------------------------------------------

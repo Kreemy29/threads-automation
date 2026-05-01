@@ -20,13 +20,14 @@ from config import MOTHER_POST_URL
 def run_mother_repost(bot):
     """
     Repost or quote the mother's Threads post, then pin it.
-    Returns True if the repost succeeded (pin failure is non-fatal).
+    Returns a (posted, pinned) tuple — pin failure is non-fatal but distinct
+    from repost failure, so callers can track them independently.
     """
     log = bot.log
 
     if not MOTHER_POST_URL:
         log.warning(f"[{bot.username}] MOTHER_POST_URL not set in .env — skipping repost")
-        return False
+        return (False, False)
 
     log.info(f"[{bot.username}] Navigating to mother post: {MOTHER_POST_URL}")
     bot.go(MOTHER_POST_URL)
@@ -39,7 +40,7 @@ def run_mother_repost(bot):
         log.info(f"[{bot.username}] Quoted mother post")
     else:
         log.warning(f"[{bot.username}] Could not repost or quote mother post")
-        return False
+        return (False, False)
 
     time.sleep(3)
 
@@ -50,7 +51,7 @@ def run_mother_repost(bot):
     else:
         log.warning(f"[{bot.username}] Pin failed — pin manually if needed")
 
-    return True
+    return (True, bool(pinned))
 
 
 # ------------------------------------------------------------------
