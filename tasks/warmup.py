@@ -233,11 +233,26 @@ def _click_follow(bot) -> bool:
             el = WebDriverWait(bot.driver, 5).until(
                 EC.element_to_be_clickable((By.XPATH, xpath))
             )
-            el.click()
-            time.sleep(random.uniform(0.8, 1.5))
+            bot.smart_click(el)
+            time.sleep(random.uniform(1.0, 2.0))
             return True
         except Exception:
             continue
+    # JS fallback — find any visible button whose text is exactly "Follow"
+    try:
+        result = bot.driver.execute_script("""
+            const btns = document.querySelectorAll('[role="button"], button');
+            for (const b of btns) {
+                const txt = (b.innerText || b.textContent || '').trim();
+                if (txt === 'Follow' && b.offsetWidth > 0) { b.click(); return true; }
+            }
+            return false;
+        """)
+        if result:
+            time.sleep(random.uniform(1.0, 2.0))
+            return True
+    except Exception:
+        pass
     return False
 
 

@@ -209,7 +209,7 @@ def _run_active_loop(bot, username, log, media_folder: str = ""):
                 text_results.append(ok)
                 _log_step(log, username, f"text post {i+1}", ok)
                 if i < plan["text_posts"] - 1:
-                    _active_browse(bot, username, log, seconds=random.randint(40, 120))
+                    _active_browse(bot, username, log, seconds=random.randint(15, 30))
 
             # Image post
             log.info(f"[{username}] Posting image post…")

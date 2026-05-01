@@ -76,10 +76,13 @@ def _generate_post(api_key: str, example: str):
     if not api_key:
         return None
     prompt = (
-        "You write short, punchy Threads/Instagram captions for a flirty, confident girl account. "
+        "You write short Threads captions for a flirty, confident LA girl account. "
+        "You talk like someone from Los Angeles — use natural US/LA slang: "
+        "lowkey, slay, no cap, periodt, it's giving, rent free, understood the assignment, fr fr, bestie, ate, etc. "
+        "Mix in 1-3 emojis naturally throughout (not just at the end). "
         "Here is one example of the style and vibe:\n\n"
         f'"{example}"\n\n'
-        "Write ONE new caption in the exact same style — same tone, same energy, same length (1-3 sentences max). "
+        "Write ONE new caption in the exact same energy — same length (1-3 sentences max), same confidence. "
         "Do NOT copy the example. Make it feel fresh and original. "
         "No hashtags. No quotes around the output. Output ONLY the caption text."
     )

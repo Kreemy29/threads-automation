@@ -320,24 +320,26 @@ class ThreadsBot:
     def click_post_button(self):
         """Click the Post submit button in the compose dialog."""
         attempts = [
-            (By.XPATH, '//*[not(contains(text(),"Posting")) and text()="Post"]'),
-            (By.XPATH, '//div[@role="button" and normalize-space(text())="Post"]'),
-            (By.XPATH, '//span[normalize-space(text())="Post"]/ancestor::div[@role="button"]'),
+            (By.XPATH, '//*[@role="button" and normalize-space(.)="Post" and @aria-disabled!="true"]'),
+            (By.XPATH, '//*[@role="button" and normalize-space(.)="Post"]'),
+            (By.XPATH, '//span[normalize-space(.)="Post"]/ancestor::*[@role="button"]'),
         ]
         for by, sel in attempts:
             try:
-                el = WebDriverWait(self.driver, 8).until(EC.element_to_be_clickable((by, sel)))
-                el.click()
+                el = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((by, sel)))
+                self.smart_click(el)
                 time.sleep(5)
                 return True
             except Exception:
                 continue
-        # JS fallback
+        # JS fallback — walks every button/role=button, matches on trimmed full text
         try:
             result = self.driver.execute_script("""
-                const buttons = document.querySelectorAll('div[role="button"]');
-                for (const b of buttons) {
-                    if (b.textContent.trim() === 'Post' && b.getAttribute('aria-disabled') !== 'true') {
+                const candidates = document.querySelectorAll('[role="button"], button');
+                for (const b of candidates) {
+                    const txt = (b.innerText || b.textContent || '').trim();
+                    const disabled = b.getAttribute('aria-disabled') === 'true' || b.disabled;
+                    if (!disabled && (txt === 'Post' || txt === 'post') && b.offsetWidth > 0) {
                         b.click(); return true;
                     }
                 }
@@ -348,6 +350,7 @@ class ThreadsBot:
                 return True
         except Exception:
             pass
+        self.log.warning(f"[{self.username}] click_post_button: no enabled Post button found")
         return False
 
     # ------------------------------------------------------------------
