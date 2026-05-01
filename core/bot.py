@@ -303,14 +303,14 @@ class ThreadsBot:
                 self.log.warning(f"JS compose fallback failed: {e}")
 
         # Wait for the textbox to appear
-        for timeout in [10, 15]:
+        for timeout in [15, 20]:
             try:
                 textbox = WebDriverWait(self.driver, timeout).until(
                     EC.presence_of_element_located((By.XPATH, '//div[@role="textbox"]'))
                 )
                 return textbox
             except Exception:
-                if timeout == 10 and clicked:
+                if timeout == 15 and clicked:
                     self.log.info("Textbox not found yet, waiting longer...")
                 continue
 
@@ -318,50 +318,66 @@ class ThreadsBot:
         return None
 
     def click_post_button(self):
-        """Click the Post submit button in the compose dialog."""
-        # JS: find the Post button INSIDE the compose modal only.
-        # Threads has a "Post" nav button on the sidebar — we must NOT click that.
-        # The compose modal is the deepest dialog/sheet on the page.
+        """Click the Post submit button in the compose dialog.
+
+        Threads renders the submit as a plain <div> with text 'Post' — no role=button,
+        no <button> tag. Multiple 'Post' elements may be on the page (e.g. sidebar nav).
+        Strategy: find all visible leaf elements whose text is exactly 'Post', then pick
+        the one closest to the active textbox in the DOM tree.
+        """
         try:
             result = self.driver.execute_script("""
-                // Find the compose modal — Threads renders it as a div with role="dialog"
-                // or as the sheet that contains the textbox.
                 const textbox = document.querySelector('[role="textbox"]');
                 if (!textbox) return 'no-textbox';
 
-                // Walk up from textbox until we find a container with buttons
-                let container = textbox;
-                for (let i = 0; i < 12; i++) {
-                    container = container.parentElement;
-                    if (!container) break;
-
-                    const btns = Array.from(container.querySelectorAll('[role="button"], button'));
-                    for (const b of btns) {
-                        const txt = (b.innerText || b.textContent || '').trim();
-                        const disabled = b.getAttribute('aria-disabled') === 'true' || b.disabled;
-                        if (!disabled && txt === 'Post' && b.offsetWidth > 0) {
-                            b.click();
-                            return 'clicked';
-                        }
-                    }
+                // Collect all visible, non-disabled leaf elements with text "Post"
+                const candidates = [];
+                for (const el of document.querySelectorAll('*')) {
+                    if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
+                    const txt = (el.innerText || '').trim();
+                    if (txt !== 'Post') continue;
+                    const disabled = el.getAttribute('aria-disabled') === 'true'
+                                  || el.getAttribute('disabled') != null;
+                    if (disabled) continue;
+                    // Skip containers — we want the innermost element with text "Post"
+                    const childHasPost = Array.from(el.children).some(
+                        c => (c.innerText || '').trim() === 'Post'
+                    );
+                    if (childHasPost) continue;
+                    candidates.push(el);
                 }
+                if (candidates.length === 0) return 'not-found';
+
+                // Pick the candidate that shares the MOST ancestors with the textbox
+                // (i.e. closest in DOM — fewest hops to a common ancestor)
+                let bestBtn = null, bestDist = Infinity;
+                for (const btn of candidates) {
+                    let el = btn, dist = 0;
+                    while (el && !el.contains(textbox)) {
+                        el = el.parentElement;
+                        dist++;
+                    }
+                    if (dist < bestDist) { bestDist = dist; bestBtn = btn; }
+                }
+
+                if (bestBtn) { bestBtn.click(); return 'clicked:' + bestDist; }
                 return 'not-found';
             """)
-            if result == 'clicked':
-                # Verify the modal actually closed (textbox gone = post submitted)
+            if result and result.startswith('clicked'):
+                self.log.info(f"[{self.username}] Post button clicked (DOM dist={result.split(':')[1]})")
+                # Verify the compose dialog actually closed
                 try:
-                    WebDriverWait(self.driver, 6).until_not(
+                    WebDriverWait(self.driver, 8).until_not(
                         EC.presence_of_element_located((By.XPATH, '//div[@role="textbox"]'))
                     )
                     time.sleep(2)
                     return True
                 except Exception:
-                    self.log.warning(f"[{self.username}] Clicked Post but dialog still open — may have failed")
-                    time.sleep(3)
+                    self.log.warning(f"[{self.username}] Clicked Post but dialog still open — retrying")
                     return False
             self.log.warning(f"[{self.username}] click_post_button: {result}")
         except Exception as e:
-            self.log.warning(f"[{self.username}] click_post_button JS error: {e}")
+            self.log.warning(f"[{self.username}] click_post_button error: {e}")
         return False
 
     # ------------------------------------------------------------------
