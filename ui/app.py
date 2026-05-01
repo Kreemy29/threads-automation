@@ -188,7 +188,8 @@ class AccountsTab(ctk.CTkFrame):
         row_data["fl_label"] = fl_lbl
 
         status_colors = {"pending": "#AAAAAA", "active": "#44FF88",
-                         "error": "#FF4444", "done": "#4488FF", "running": "#FFAA00"}
+                         "error": "#FF4444", "done": "#4488FF", "running": "#FFAA00",
+                         "invalid": "#FF8800"}
         status_lbl = ctk.CTkLabel(row_frame, text=status, width=90,
                                   font=("Segoe UI", 11),
                                   text_color=status_colors.get(status, "#AAAAAA"))
@@ -198,6 +199,8 @@ class AccountsTab(ctk.CTkFrame):
 
         ctk.CTkButton(row_frame, text="✕", width=36, fg_color="#550000", hover_color="#880000",
                       command=lambda u=username: self._remove(u)).pack(side="right", padx=6, pady=3)
+        ctk.CTkButton(row_frame, text="Reset", width=52, fg_color="#1a4a1a", hover_color="#2a6a2a",
+                      command=lambda u=username: self._reset_account(u)).pack(side="right", padx=2, pady=3)
 
         self._rows.append(row_data)
         self._count_lbl.configure(text=f"{len(self._rows)} accounts")
@@ -212,6 +215,12 @@ class AccountsTab(ctk.CTkFrame):
                 r["mf_label"].configure(text=os.path.basename(folder))
                 break
         self._save_to_file()
+
+    def _reset_account(self, username):
+        import data.db as db
+        db.init_db()
+        db.update_account(username, state="pending", notes="", retry_count=0)
+        self.update_status(username, "pending")
 
     def _remove(self, username):
         self._rows = [r for r in self._rows if r["username"] != username]
@@ -334,8 +343,13 @@ class FollowListsTab(ctk.CTkFrame):
 
         ctk.CTkLabel(left, text="Handles (one per line — @handle or full URL):",
                      text_color="#AAAAAA", font=("Segoe UI", 11)).pack(anchor="w", pady=(6, 2))
-        self._handles_box = ctk.CTkTextbox(left, font=("Segoe UI", 12))
+        self._handles_box = ctk.CTkTextbox(left, font=("Segoe UI", 12),
+                                           border_width=1, border_color="#444444")
         self._handles_box.pack(fill="both", expand=True)
+        self._handles_box.insert("1.0", "Type handles here, one per line\n@handle or www.threads.net/@handle")
+        self._handles_box.bind("<FocusIn>", self._clear_placeholder)
+        self._handles_box.bind("<FocusOut>", self._restore_placeholder)
+        self._placeholder_active = True
 
         self._status_lbl = ctk.CTkLabel(left, text="", font=("Segoe UI", 11), text_color="#44FF88")
         self._status_lbl.pack(anchor="w", pady=4)
@@ -351,6 +365,16 @@ class FollowListsTab(ctk.CTkFrame):
 
         ctk.CTkButton(right, text="↻ Refresh", width=160,
                       command=self._refresh_lists).pack(padx=8, pady=8)
+
+    def _clear_placeholder(self, _event=None):
+        if self._placeholder_active:
+            self._handles_box.delete("1.0", "end")
+            self._placeholder_active = False
+
+    def _restore_placeholder(self, _event=None):
+        if not self._handles_box.get("1.0", "end").strip():
+            self._handles_box.insert("1.0", "Type handles here, one per line\n@handle or www.threads.net/@handle")
+            self._placeholder_active = True
 
     def _refresh_lists(self):
         for w in self._list_scroll.winfo_children():
@@ -376,13 +400,26 @@ class FollowListsTab(ctk.CTkFrame):
         self._name_entry.insert(0, name)
         self._handles_box.delete("1.0", "end")
         self._handles_box.insert("1.0", "\n".join(handles))
+        self._placeholder_active = False
 
     def _save_list(self):
         name = self._name_entry.get().strip()
         if not name:
             messagebox.showwarning("Missing name", "Enter a list name")
             return
-        raw = self._handles_box.get("1.0", "end").strip()
+
+        # If name looks like a handle/URL, move it into the handles box automatically
+        is_handle_in_name = name.startswith("@") or "threads.net" in name or "threads.com" in name
+        if is_handle_in_name:
+            if self._placeholder_active:
+                self._handles_box.delete("1.0", "end")
+                self._placeholder_active = False
+            self._handles_box.insert("end", name + "\n")
+            name = name.lstrip("@").split("/")[-1]  # derive a clean list name
+            self._name_entry.delete(0, "end")
+            self._name_entry.insert(0, name)
+
+        raw = "" if self._placeholder_active else self._handles_box.get("1.0", "end").strip()
         handles = [h.strip() for h in raw.splitlines() if h.strip()]
         if not handles:
             messagebox.showwarning("Empty list", "Add at least one handle")
@@ -403,6 +440,8 @@ class FollowListsTab(ctk.CTkFrame):
             db.init_db()
             db.delete_follow_list(name)
             self._handles_box.delete("1.0", "end")
+            self._handles_box.insert("1.0", "Type handles here, one per line\n@handle or www.threads.net/@handle")
+            self._placeholder_active = True
             self._name_entry.delete(0, "end")
             self._refresh_lists()
 
@@ -452,7 +491,7 @@ class SettingsTab(ctk.CTkFrame):
         warm_card = self._card(left, "")
         warm_card.pack(fill="x", pady=(0, 8))
 
-        self.warmup_duration  = IntEntry(warm_card, "Warmup duration (minutes)", "60")
+        self.warmup_duration  = IntEntry(warm_card, "Warmup duration (minutes)", "10")
         self.warmup_duration.pack(fill="x", padx=12, pady=4)
 
         self.warmup_targets   = LabeledEntry(warm_card, "Warmup targets (comma-separated @handles)", "", width=300)
@@ -501,11 +540,15 @@ class SettingsTab(ctk.CTkFrame):
         eng_card = self._card(right, "")
         eng_card.pack(fill="x", pady=(0, 8))
 
-        self.comments_min     = IntEntry(eng_card, "Comments per day MIN", "2")
-        self.comments_min.pack(fill="x", padx=12, pady=4)
+        comments_row = ctk.CTkFrame(eng_card, fg_color="transparent")
+        comments_row.pack(fill="x", padx=12, pady=4)
+        self.comments_min = IntEntry(comments_row, "Comments/day MIN", "4", width=90)
+        self.comments_min.pack(side="left", padx=(0, 8))
+        self.comments_max = IntEntry(comments_row, "Comments/day MAX", "6", width=90)
+        self.comments_max.pack(side="left")
 
-        self.comments_max     = IntEntry(eng_card, "Comments per day MAX", "4")
-        self.comments_max.pack(fill="x", padx=12, pady=4)
+        self.pic_comment_ratio = IntEntry(eng_card, "Pic comment ratio % (0–100)", "20")
+        self.pic_comment_ratio.pack(fill="x", padx=12, pady=4)
 
         self.follow_batch     = IntEntry(eng_card, "Follow batch size", "20")
         self.follow_batch.pack(fill="x", padx=12, pady=4)
@@ -557,6 +600,7 @@ class SettingsTab(ctk.CTkFrame):
             "warmup_max_follows":   self.warmup_max_follows.get(),
             "comments_min":         self.comments_min.get(),
             "comments_max":         self.comments_max.get(),
+            "pic_comment_ratio":    self.pic_comment_ratio.get(),
             "follow_batch":         self.follow_batch.get(),
             "unfollow_hours":       self.unfollow_hours.get(),
             "outreach_targets":     self.outreach_targets.get(),
@@ -578,8 +622,9 @@ class SettingsTab(ctk.CTkFrame):
         self.warmup_likes_min.set(d.get("warmup_likes_min", 2))
         self.warmup_likes_max.set(d.get("warmup_likes_max", 6))
         self.warmup_max_follows.set(d.get("warmup_max_follows", 8))
-        self.comments_min.set(d.get("comments_min", 2))
-        self.comments_max.set(d.get("comments_max", 4))
+        self.comments_min.set(d.get("comments_min", 4))
+        self.comments_max.set(d.get("comments_max", 6))
+        self.pic_comment_ratio.set(d.get("pic_comment_ratio", 20))
         self.follow_batch.set(d.get("follow_batch", 20))
         self.unfollow_hours.set(d.get("unfollow_hours", 2))
         self.outreach_targets.set(d.get("outreach_targets", ""))
@@ -590,9 +635,14 @@ class SettingsTab(ctk.CTkFrame):
 
     def _save_preset(self):
         name = self._preset_name.get().strip() or "default"
+        data = self._to_dict()
         path = os.path.join(PRESETS_DIR, f"{name}.json")
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(self._to_dict(), f, indent=2)
+            json.dump(data, f, indent=2)
+        # Also write as active so workers always use the latest saved settings
+        active_path = os.path.join(PRESETS_DIR, "active.json")
+        with open(active_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
         self._saved_lbl.configure(text=f"✓ Saved '{name}'")
         self.after(3000, lambda: self._saved_lbl.configure(text=""))
 
@@ -949,6 +999,7 @@ class App(ctk.CTk):
         config.POST_CYCLE_MAX          = s["cycle_max"] * 60
         config.OUTREACH_COMMENTS_MIN   = s["comments_min"]
         config.OUTREACH_COMMENTS_MAX   = s["comments_max"]
+        config.PIC_COMMENT_RATIO       = s.get("pic_comment_ratio", 20)
         config.FOLLOW_BATCH_SIZE       = s["follow_batch"]
         config.UNFOLLOW_AFTER_SECONDS  = s["unfollow_hours"] * 3600
         config.WARMUP_DURATION         = s["warmup_duration"] * 60
@@ -957,14 +1008,24 @@ class App(ctk.CTk):
         config.WARMUP_MAX_FOLLOWS      = s.get("warmup_max_follows", 8)
         config.ACTIVE_LIKES_MIN        = s.get("active_likes_min", 1)
         config.ACTIVE_LIKES_MAX        = s.get("active_likes_max", 5)
+        config.TEXT_POSTS_PER_CYCLE    = s.get("text_posts", 4)
         config.MOTHER_POST_URL         = s["mother_post_url"]
         config.BATCH_SIZE              = s["batch_size"]
         config.ADSPOWER_API_KEY        = s.get("adspower_api_key", "")
         config.GEMINI_API_KEY          = s.get("gemini_key", "")
 
-        raw_warmup = [h.strip().lstrip("@") for h in s["warmup_targets"].split(",") if h.strip()]
+        raw_warmup = [h.strip().lstrip("@") for h in s.get("warmup_targets", "").split(",") if h.strip()]
         if raw_warmup:
             config.WARMUP_TARGETS = [f"https://www.threads.net/@{h}" for h in raw_warmup]
+
+        raw_outreach = [h.strip().lstrip("@") for h in s.get("outreach_targets", "").split(",") if h.strip()]
+        if raw_outreach:
+            config.OUTREACH_TARGETS = [f"https://www.threads.net/@{h}" for h in raw_outreach]
+
+        # Write to disk so child worker processes pick up the same values
+        active_path = os.path.join(PRESETS_DIR, "active.json")
+        with open(active_path, "w", encoding="utf-8") as f:
+            json.dump(s, f, indent=2)
 
         raw_outreach = [h.strip().lstrip("@") for h in s["outreach_targets"].split(",") if h.strip()]
         if raw_outreach:

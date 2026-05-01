@@ -89,6 +89,8 @@ class Coordinator:
             db.update_account(username, state="running")
             time.sleep(2)  # stagger starts slightly
 
+    MAX_RETRIES = 5
+
     def _reap_finished(self):
         finished = [u for u, p in self.active.items() if not p.is_alive()]
         for username in finished:
@@ -101,12 +103,28 @@ class Coordinator:
             if current_state == "invalid":
                 pass
             elif current_state == "running":
-                # Worker exited without updating state itself
                 note = f"process exited with code {exit_code}" if exit_code != 0 else "worker exited without updating state"
-                db.update_account(username, state="error", notes=note)
+                retry = (account.get("retry_count") or 0) + 1
+                if retry >= self.MAX_RETRIES:
+                    db.update_account(username, state="invalid", retry_count=retry,
+                                      notes=f"gave up after {retry} retries — last: {note}")
+                    log.error(f"@{username} marked invalid after {retry} failed attempts")
+                else:
+                    db.update_account(username, state="error", retry_count=retry, notes=note)
+                    log.warning(f"@{username} errored (attempt {retry}/{self.MAX_RETRIES})")
             elif exit_code != 0:
-                db.update_account(username, state="error",
-                                  notes=f"process exited with code {exit_code}")
+                retry = (account.get("retry_count") or 0) + 1
+                note = f"process exited with code {exit_code}"
+                if retry >= self.MAX_RETRIES:
+                    db.update_account(username, state="invalid", retry_count=retry,
+                                      notes=f"gave up after {retry} retries — last: {note}")
+                    log.error(f"@{username} marked invalid after {retry} failed attempts")
+                else:
+                    db.update_account(username, state="error", retry_count=retry, notes=note)
+                    log.warning(f"@{username} errored (attempt {retry}/{self.MAX_RETRIES})")
+            else:
+                # Successful exit — reset retry counter
+                db.update_account(username, retry_count=0)
 
     def _print_status(self):
         pending_count = len(db.get_pending_accounts(9999))

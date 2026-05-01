@@ -65,8 +65,9 @@ def init_db():
 
     # ── migrations: add columns that may not exist in older DBs ──
     for col, definition in [
-        ("media_folder", "TEXT DEFAULT ''"),
-        ("follow_list",  "TEXT DEFAULT ''"),
+        ("media_folder",  "TEXT DEFAULT ''"),
+        ("follow_list",   "TEXT DEFAULT ''"),
+        ("retry_count",   "INTEGER DEFAULT 0"),
     ]:
         try:
             c.execute(f"ALTER TABLE accounts ADD COLUMN {col} {definition}")
@@ -94,7 +95,7 @@ def load_accounts_from_file(filepath):
             parts = [p.strip() for p in line.split(",")]
             if len(parts) < 2:
                 continue
-            username    = parts[0]
+            username    = parts[0].lstrip("@")
             adspower_id = parts[1]
             media_folder = parts[2] if len(parts) > 2 else ""
             follow_list  = parts[3] if len(parts) > 3 else ""

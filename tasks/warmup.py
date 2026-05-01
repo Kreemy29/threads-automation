@@ -1,9 +1,8 @@
 """
-Warmup phase — human-like browsing before the account starts posting.
+Warmup phase — structured plan-based execution.
 
-Every account gets a different randomized sequence of micro-actions so no two
-accounts ever follow the same pattern. Actions are weighted and shuffled each
-run, with random delays, pauses, and "mood" shifts built in.
+At the start of each warmup session the bot builds a concrete plan from settings,
+announces it, then executes each phase and validates success/failure.
 """
 import time
 import random
@@ -22,239 +21,195 @@ from config import WARMUP_TARGETS, WARMUP_DURATION, WARMUP_LIKES_MIN, WARMUP_LIK
 
 def run_warmup(bot, follow_list: list = None):
     log = bot.log
-    log.info(f"[{bot.username}] Warmup starting ({WARMUP_DURATION // 60} min)")
-
     targets = _resolve_targets(follow_list) or list(WARMUP_TARGETS)
-    random.shuffle(targets)  # each account visits targets in a different order
+    random.shuffle(targets)
 
-    end_time = time.time() + WARMUP_DURATION
-    _run_randomized_session(bot, targets, end_time)
+    # ── Build the plan ──────────────────────────────────────────────────────
+    follows_planned  = min(WARMUP_MAX_FOLLOWS, len(targets))
+    likes_per_visit  = random.randint(WARMUP_LIKES_MIN, WARMUP_LIKES_MAX)
+    likes_planned    = follows_planned * likes_per_visit
+    browse_minutes   = max(1, (WARMUP_DURATION - follows_planned * 45) // 60)
 
+    plan = {
+        "follows":  {"planned": follows_planned,  "done": 0, "failed": 0},
+        "likes":    {"planned": likes_planned,     "done": 0, "failed": 0},
+        "browse_minutes": browse_minutes,
+    }
+
+    log.info(
+        f"[{bot.username}] Warmup plan: "
+        f"follow {follows_planned} accounts | "
+        f"like ~{likes_planned} posts ({likes_per_visit}/profile) | "
+        f"browse feed ~{browse_minutes} min (with mood shifts)"
+    )
+
+    # ── Phase 1: Visit each target with mood-based browsing between visits ──
+    log.info(f"[{bot.username}] ── Phase 1: visiting & following {follows_planned} profiles")
+    for i, url in enumerate(targets[:follows_planned], 1):
+        # Brief mood-based feed browse before each profile (except the first)
+        if i > 1:
+            mood = _new_mood()
+            browse_secs = random.randint(20, 50)
+            log.info(f"[{bot.username}]   → feed browse ({mood['name']} mood, {browse_secs}s)")
+            _browse_feed(bot, time.time() + browse_secs, mood)
+
+        log.info(f"[{bot.username}]   [{i}/{follows_planned}] {url}")
+        try:
+            bot.go(url)
+            time.sleep(random.uniform(2, 4))
+
+            # Like posts on this profile
+            n = _like_visible_posts(bot, likes_per_visit)
+            plan["likes"]["done"] += n
+            if n < likes_per_visit:
+                plan["likes"]["failed"] += likes_per_visit - n
+            log.info(f"[{bot.username}]   Liked {n}/{likes_per_visit} posts {'✓' if n else '✗'}")
+
+            # Follow
+            if _click_follow(bot):
+                plan["follows"]["done"] += 1
+                log.info(f"[{bot.username}]   Followed ✓")
+            else:
+                plan["follows"]["failed"] += 1
+                log.info(f"[{bot.username}]   Follow failed ✗")
+
+            time.sleep(random.uniform(3, 7))
+
+        except Exception as e:
+            err = str(e)
+            if "invalid session id" in err or "not connected to DevTools" in err or "disconnected" in err:
+                log.error(f"[{bot.username}] Browser session lost — aborting warmup")
+                _log_plan_summary(bot, plan)
+                raise
+            plan["follows"]["failed"] += 1
+            log.warning(f"[{bot.username}]   Error on {url}: {e}")
+
+    _log_phase_result(bot, "follows", plan["follows"])
+
+    # ── Phase 2: Extended mood-based feed browsing for remaining time ────────
+    log.info(f"[{bot.username}] ── Phase 2: browsing feed for ~{browse_minutes} min")
+    end_time = time.time() + browse_minutes * 60
+    _browse_feed(bot, end_time)
+    log.info(f"[{bot.username}]   Feed browse complete ✓")
+
+    # ── Summary ─────────────────────────────────────────────────────────────
+    _log_plan_summary(bot, plan)
     log.info(f"[{bot.username}] Warmup complete")
 
 
 # ---------------------------------------------------------------------------
-# Core randomized session loop
+# Mood system
 # ---------------------------------------------------------------------------
 
-def _run_randomized_session(bot, targets, end_time):
-    """
-    Runs a randomized mix of actions until end_time.
-    Each iteration picks a random action from a weighted pool that changes
-    based on what was just done — so the bot never repeats the same
-    action back-to-back.
-    """
-    log = bot.log
-    last_action = None
-    targets_remaining = list(targets)
-    liked_total = 0
-    followed_total = 0
+_MOODS = [
+    {
+        "name": "casual",
+        "scroll_min": 250, "scroll_max": 600,
+        "read_chance": 0.25, "read_min": 2, "read_max": 7,
+        "like_chance": 0.08,
+        "gap_min": 1.0,  "gap_max": 3.5,
+    },
+    {
+        "name": "engaged",
+        "scroll_min": 150, "scroll_max": 400,
+        "read_chance": 0.45, "read_min": 4, "read_max": 12,
+        "like_chance": 0.15,
+        "gap_min": 2.0,  "gap_max": 6.0,
+    },
+    {
+        "name": "fast",
+        "scroll_min": 500, "scroll_max": 1000,
+        "read_chance": 0.08, "read_min": 1, "read_max": 3,
+        "like_chance": 0.04,
+        "gap_min": 0.3,  "gap_max": 1.5,
+    },
+    {
+        "name": "distracted",
+        "scroll_min": 300, "scroll_max": 700,
+        "read_chance": 0.15, "read_min": 8, "read_max": 25,
+        "like_chance": 0.06,
+        "gap_min": 3.0,  "gap_max": 10.0,
+    },
+]
 
-    # "Mood" controls pace — shifts randomly every few actions
-    mood = _new_mood()
-    mood_counter = 0
+def _new_mood():
+    return random.choice(_MOODS)
+
+
+# ---------------------------------------------------------------------------
+# Feed browsing
+# ---------------------------------------------------------------------------
+
+def _browse_feed(bot, end_time, mood=None):
+    bot.go_home()
+    if mood is None:
+        mood = _new_mood()
+    mood_ticks = 0
+    mood_shift_at = random.randint(4, 8)
 
     while time.time() < end_time:
-        # Shift mood every 3-7 actions
-        mood_counter += 1
-        if mood_counter >= random.randint(3, 7):
-            mood = _new_mood()
-            mood_counter = 0
-            log.info(f"[{bot.username}] Mood → {mood['name']}")
-
-        # Build action pool — exclude last action to avoid repetition
-        pool = _build_action_pool(
-            last_action, targets_remaining,
-            liked_total, followed_total, end_time
-        )
-        if not pool:
-            _idle_scroll(bot, mood, seconds=random.randint(20, 40))
-            continue
-
-        action = random.choices(pool["actions"], weights=pool["weights"], k=1)[0]
-        last_action = action
-
         try:
-            if action == "scroll_feed":
-                _scroll_feed(bot, mood, seconds=random.randint(25, 70))
+            # Shift mood every few ticks
+            mood_ticks += 1
+            if mood_ticks >= mood_shift_at:
+                mood = _new_mood()
+                mood_ticks = 0
+                mood_shift_at = random.randint(4, 8)
+                bot.log.info(f"[{bot.username}]   Mood → {mood['name']}")
 
-            elif action == "visit_profile":
-                if targets_remaining:
-                    url = targets_remaining.pop(0)
-                    _visit_profile(bot, url, mood)
-                else:
-                    _scroll_feed(bot, mood, seconds=20)
+            scroll_px = random.randint(mood["scroll_min"], mood["scroll_max"])
+            bot.driver.execute_script(f"window.scrollBy(0, {scroll_px});")
 
-            elif action == "like_on_profile":
-                if targets_remaining:
-                    url = targets_remaining[0]
-                    n = _like_visible_posts(bot, random.randint(WARMUP_LIKES_MIN, WARMUP_LIKES_MAX))
-                    liked_total += n
-                    log.info(f"[{bot.username}] Liked {n} posts (total {liked_total})")
+            if random.random() < mood["read_chance"]:
+                time.sleep(random.uniform(mood["read_min"], mood["read_max"]))
+            else:
+                time.sleep(random.uniform(mood["gap_min"], mood["gap_max"]))
 
-            elif action == "follow_profile":
-                if targets_remaining:
-                    url = targets_remaining.pop(0)
-                    bot.go(url)
-                    time.sleep(random.uniform(2, 4))
-                    if _click_follow(bot):
-                        followed_total += 1
-                        log.info(f"[{bot.username}] Followed {url} (total {followed_total})")
-                    _read_pause(bot, mood)
-
-            elif action == "open_post":
-                _open_random_post(bot, mood)
-
-            elif action == "go_home_browse":
-                bot.go_home()
-                time.sleep(random.uniform(1.5, 3))
-                _scroll_feed(bot, mood, seconds=random.randint(15, 35))
-
-            elif action == "long_pause":
-                pause = random.uniform(15, 45)
-                log.info(f"[{bot.username}] Long pause {pause:.0f}s")
-                time.sleep(pause)
-
-            elif action == "scroll_to_top_then_down":
-                bot.scroll_to_top()
-                time.sleep(random.uniform(1, 2))
-                _scroll_feed(bot, mood, seconds=random.randint(10, 25))
+            # Low-chance like while browsing (main likes done in phase 1)
+            if random.random() < mood["like_chance"]:
+                _like_visible_posts(bot, 1)
 
         except Exception as e:
-            log.warning(f"[{bot.username}] Warmup action '{action}' error: {e}")
+            err = str(e)
+            if "invalid session id" in err or "not connected to DevTools" in err:
+                raise
             time.sleep(3)
 
-        # Inter-action gap — varies by mood
-        _inter_action_gap(mood)
-
 
 # ---------------------------------------------------------------------------
-# Action pool builder
+# Like posts (top-level only, no comment likes)
 # ---------------------------------------------------------------------------
-
-def _build_action_pool(last_action, targets_remaining, liked, followed, end_time):
-    remaining_secs = end_time - time.time()
-    has_targets = bool(targets_remaining)
-
-    actions, weights = [], []
-
-    def add(name, weight):
-        if name != last_action:  # never repeat last action
-            actions.append(name)
-            weights.append(weight)
-
-    add("scroll_feed",            40)
-    add("go_home_browse",         15)
-    add("long_pause",             10)
-    add("scroll_to_top_then_down", 10)
-    add("open_post",              20)
-
-    if has_targets:
-        add("visit_profile",   20)
-        add("like_on_profile", 25)
-        if followed < WARMUP_MAX_FOLLOWS:
-            add("follow_profile", 15)
-
-    if not actions:
-        # Fallback — last_action exclusion blocked everything
-        actions = ["scroll_feed", "long_pause"]
-        weights = [70, 30]
-
-    return {"actions": actions, "weights": weights}
-
-
-# ---------------------------------------------------------------------------
-# Individual actions
-# ---------------------------------------------------------------------------
-
-def _scroll_feed(bot, mood, seconds=40):
-    bot.go_home()
-    start = time.time()
-    while time.time() - start < seconds:
-        scroll_px = random.randint(mood["scroll_min"], mood["scroll_max"])
-        bot.driver.execute_script(f"window.scrollBy(0, {scroll_px});")
-
-        # Occasionally stop to "read"
-        if random.random() < mood["read_chance"]:
-            time.sleep(random.uniform(mood["read_min"], mood["read_max"]))
-        else:
-            time.sleep(random.uniform(0.4, 1.4))
-
-        # Occasionally like something
-        if random.random() < mood["like_chance"]:
-            _like_visible_posts(bot, 1)
-
-
-def _idle_scroll(bot, mood, seconds=30):
-    start = time.time()
-    while time.time() - start < seconds:
-        bot.driver.execute_script(
-            f"window.scrollBy(0, {random.randint(200, 600)});"
-        )
-        time.sleep(random.uniform(0.8, 2.5))
-
-
-def _visit_profile(bot, url, mood):
-    bot.go(url)
-    time.sleep(random.uniform(2, 4))
-    # Scroll through their posts
-    for _ in range(random.randint(2, 5)):
-        bot.driver.execute_script(
-            f"window.scrollBy(0, {random.randint(300, 700)});"
-        )
-        time.sleep(random.uniform(mood["read_min"], mood["read_max"]))
-
-
-def _open_random_post(bot, mood):
-    """Click on a random post from the current feed to open it."""
-    try:
-        links = bot.driver.find_elements(
-            By.XPATH, '//a[contains(@href,"/post/") or contains(@href,"/t/")]'
-        )
-        if not links:
-            return
-        link = random.choice(links[:8])
-        href = link.get_attribute("href")
-        if href:
-            bot.go(href)
-            _read_pause(bot, mood)
-            bot.go_home()
-    except Exception:
-        pass
-
-
-def _read_pause(bot, mood):
-    time.sleep(random.uniform(mood["read_min"], mood["read_max"]))
-    # Sometimes scroll down a bit while "reading"
-    if random.random() < 0.5:
-        for _ in range(random.randint(1, 3)):
-            bot.driver.execute_script(
-                f"window.scrollBy(0, {random.randint(150, 400)});"
-            )
-            time.sleep(random.uniform(0.8, 2))
-
 
 def _like_visible_posts(bot, count):
+    """Like up to `count` top-level posts only — skips comment likes."""
     liked = 0
     try:
-        hearts = bot.driver.find_elements(By.XPATH, '//svg[@aria-label="Like"]')
-        random.shuffle(hearts)
-        for heart in hearts:
+        btns = bot.driver.execute_script("""
+            const results = [];
+            const articles = document.querySelectorAll('article, div[data-pressable-container="true"]');
+            for (const article of articles) {
+                const btn = article.querySelector(
+                    '[role="button"] svg[aria-label="Like"], svg[aria-label="Like"]'
+                );
+                if (btn) {
+                    let el = btn;
+                    for (let i = 0; i < 6; i++) {
+                        if (el && el.getAttribute && el.getAttribute('role') === 'button') break;
+                        el = el.parentElement;
+                    }
+                    if (el && el.offsetWidth > 0) results.push(el);
+                }
+            }
+            return results;
+        """)
+        random.shuffle(btns)
+        for btn in btns:
             if liked >= count:
                 break
             try:
-                if heart.rect["height"] == 0:
-                    continue
-                el = heart
-                for _ in range(5):
-                    el = bot.driver.execute_script("return arguments[0].parentElement;", el)
-                    if el and el.get_attribute("role") == "button":
-                        break
-                bot.driver.execute_script(
-                    "arguments[0].scrollIntoView({block:'center'});", el
-                )
-                time.sleep(random.uniform(0.3, 0.8))
-                el.click()
+                bot.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                time.sleep(random.uniform(0.4, 1.0))
+                btn.click()
                 liked += 1
                 time.sleep(random.uniform(1.2, 3))
             except Exception:
@@ -264,11 +219,15 @@ def _like_visible_posts(bot, count):
     return liked
 
 
+# ---------------------------------------------------------------------------
+# Follow button
+# ---------------------------------------------------------------------------
+
 def _click_follow(bot) -> bool:
     for xpath in [
-        '//div[@role="button" and text()="Follow"]',
-        '//span[text()="Follow"]/ancestor::div[@role="button"]',
+        '//*[@role="button" and normalize-space(.)="Follow"]',
         '//button[normalize-space()="Follow"]',
+        '//*[@role="button" and .//span[normalize-space(.)="Follow"]]',
     ]:
         try:
             el = WebDriverWait(bot.driver, 5).until(
@@ -283,46 +242,26 @@ def _click_follow(bot) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Mood system
+# Logging helpers
 # ---------------------------------------------------------------------------
 
-_MOODS = [
-    {
-        "name": "casual",
-        "scroll_min": 250, "scroll_max": 600,
-        "read_chance": 0.25, "read_min": 2, "read_max": 7,
-        "like_chance": 0.12,
-        "gap_min": 1.0, "gap_max": 3.5,
-    },
-    {
-        "name": "engaged",
-        "scroll_min": 150, "scroll_max": 400,
-        "read_chance": 0.45, "read_min": 4, "read_max": 12,
-        "like_chance": 0.25,
-        "gap_min": 2.0, "gap_max": 6.0,
-    },
-    {
-        "name": "fast",
-        "scroll_min": 500, "scroll_max": 1000,
-        "read_chance": 0.08, "read_min": 1, "read_max": 3,
-        "like_chance": 0.06,
-        "gap_min": 0.3, "gap_max": 1.5,
-    },
-    {
-        "name": "distracted",   # long random pauses between scrolls
-        "scroll_min": 300, "scroll_max": 700,
-        "read_chance": 0.15, "read_min": 8, "read_max": 25,
-        "like_chance": 0.10,
-        "gap_min": 3.0, "gap_max": 10.0,
-    },
-]
-
-def _new_mood():
-    return random.choice(_MOODS)
+def _log_phase_result(bot, phase_name, result):
+    planned = result["planned"]
+    done    = result["done"]
+    failed  = result["failed"]
+    status  = "✓" if failed == 0 else ("~" if done > 0 else "✗")
+    bot.log.info(
+        f"[{bot.username}] Phase '{phase_name}': "
+        f"{done}/{planned} done, {failed} failed {status}"
+    )
 
 
-def _inter_action_gap(mood):
-    time.sleep(random.uniform(mood["gap_min"], mood["gap_max"]))
+def _log_plan_summary(bot, plan):
+    bot.log.info(f"[{bot.username}] ── Warmup summary ──────────────────")
+    for key, val in plan.items():
+        if isinstance(val, dict):
+            _log_phase_result(bot, key, val)
+    bot.log.info(f"[{bot.username}] ────────────────────────────────────")
 
 
 # ---------------------------------------------------------------------------

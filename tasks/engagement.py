@@ -25,6 +25,7 @@ from config import (
     FOLLOW_BATCH_SIZE,
     UNFOLLOW_AFTER_SECONDS,
     GEMINI_API_KEY,
+    PIC_COMMENT_RATIO,
 )
 
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), "..", "content")
@@ -116,44 +117,109 @@ def _load_lines(filename):
         return [line.strip() for line in f if line.strip()]
 
 
+def _pick_random_image():
+    """Return a random image path from content/images/, or None if empty."""
+    images_dir = os.path.join(CONTENT_DIR, "images")
+    if not os.path.isdir(images_dir):
+        return None
+    candidates = [
+        os.path.join(images_dir, f)
+        for f in os.listdir(images_dir)
+        if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+    ]
+    return random.choice(candidates) if candidates else None
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # AI comment generation
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _extract_post_context(bot) -> str:
     """
-    Extract post text + visible comments from the current open reply dialog.
+    Extract post text + visible comments from the current post page.
+    Call this BEFORE clicking the reply button, while the full post is visible.
     Returns a combined context string for the LLM.
     """
     js = """
     function getContext() {
-        const dialog = document.querySelector('div[role="dialog"]');
-        const root   = dialog || document;
+        const result = { post: "", comments: [] };
 
-        // Grab all visible text spans, filter noise
-        const spans = Array.from(root.querySelectorAll('span[dir="auto"]'))
-            .filter(s => !s.closest('div[role="button"]'))
+        // --- Post body ---
+        // Threads renders post text in a div[data-pressable-container] > article
+        // or directly in the first article on the page.
+        // Strategy: find the longest non-trivial text block not inside a nav/button.
+        const NOISE = new Set([
+            'cancel','reply','add a topic','like','share','follow','following',
+            'see more','translate','report','copy link','embed','quote'
+        ]);
+
+        function cleanText(el) {
+            return (el.innerText || el.textContent || '').trim();
+        }
+
+        // Walk articles / sections looking for the post body
+        const articles = document.querySelectorAll('article, section[data-pressable-container]');
+        let bestLen = 0;
+        for (const article of articles) {
+            // Skip obvious comment-section articles (nested deep)
+            const depth = article.closest('article') ? 99 : 0;
+            if (depth > 0) continue;
+
+            const txt = cleanText(article);
+            if (txt.length > bestLen && !NOISE.has(txt.toLowerCase())) {
+                bestLen = txt.length;
+                result.post = txt.slice(0, 500);  // cap at 500 chars
+            }
+        }
+
+        // Fallback: grab longest span[dir="auto"] not in a button
+        if (!result.post) {
+            const spans = Array.from(document.querySelectorAll('span[dir="auto"]'))
+                .filter(s => !s.closest('[role="button"]') && !s.closest('nav'))
+                .map(s => s.textContent.trim())
+                .filter(t => t.length > 15 && !NOISE.has(t.toLowerCase()));
+            spans.sort((a, b) => b.length - a.length);
+            result.post = spans[0] || "";
+        }
+
+        // --- Comments (top visible ones, excluding the post author's text) ---
+        // Comments appear as reply articles after the main post
+        const postText = result.post.slice(0, 60).toLowerCase();
+        const commentSpans = Array.from(document.querySelectorAll('span[dir="auto"]'))
+            .filter(s => !s.closest('[role="button"]') && !s.closest('nav'))
             .map(s => s.textContent.trim())
-            .filter(t => t.length > 8 && !['Cancel','Reply','Add a topic','Like','Share'].includes(t));
+            .filter(t =>
+                t.length > 5 && t.length < 200 &&
+                !NOISE.has(t.toLowerCase()) &&
+                !postText.includes(t.toLowerCase().slice(0, 30))
+            );
 
-        // Sort longest first — post body is usually the longest span
-        spans.sort((a, b) => b.length - a.length);
+        // Deduplicate and take first 5
+        const seen = new Set();
+        for (const c of commentSpans) {
+            if (!seen.has(c)) {
+                seen.add(c);
+                result.comments.push(c);
+                if (result.comments.length >= 5) break;
+            }
+        }
 
-        // First item = post body, rest = comments (cap at 3)
-        const postBody   = spans[0] || "";
-        const comments   = spans.slice(1, 4);
-        return JSON.stringify({ post: postBody, comments });
+        return JSON.stringify(result);
     }
     return getContext();
     """
     try:
         raw = bot.driver.execute_script(js)
         data = __import__("json").loads(raw)
-        post = data.get("post", "")
+        post = data.get("post", "").strip()
         comments = data.get("comments", [])
+
+        if not post:
+            return ""
+
         context = f"Post: {post}"
         if comments:
-            context += "\n\nTop comments:\n" + "\n".join(f"- {c}" for c in comments)
+            context += "\n\nSome comments on this post:\n" + "\n".join(f"- {c}" for c in comments[:5])
         return context
     except Exception as e:
         bot.log.warning(f"[{bot.username}] Context extraction failed: {e}")
@@ -166,12 +232,14 @@ def _generate_ai_comment(api_key: str, context: str):
         return None
 
     prompt = (
-        "You are a real girl on social media leaving short, genuine comments on posts. "
-        "Keep it 1 sentence max, casual and human. Use 1 emoji if it fits naturally. "
-        "No hashtags. No 'as an AI'. Never mention you're a bot. "
-        "ONLY output the comment itself, nothing else.\n\n"
-        f"Here is the post and some comments:\n\n{context}\n\n"
-        "Write ONE short, natural reply comment."
+        "You are a real girl on social media leaving a short comment on someone else's Threads post. "
+        "The post content and some comments are shown below.\n\n"
+        f"{context}\n\n"
+        "Write ONE comment that directly responds to what the post is actually about. "
+        "Make it specific — reference the topic, the vibe, or something said. "
+        "1-2 sentences max. Casual and genuine, flirty or supportive depending on the post. "
+        "1 emoji only if it fits naturally. No hashtags. No generic lines like 'Love this' or 'So true'. "
+        "ONLY output the comment text, nothing else."
     )
 
     try:
@@ -299,15 +367,34 @@ def _get_recent_post_url(bot, profile_url: str):
 def _post_comment_on(bot, post_url: str, api_key: str, fallback_comments: list) -> bool:
     log = bot.log
     bot.go(post_url)
-    time.sleep(random.uniform(2, 3.5))
+    time.sleep(random.uniform(2.5, 4))
 
-    # Click the middle reply button (like original project)
+    # Extract post context BEFORE clicking reply — full post text is visible here
+    context = _extract_post_context(bot)
+    log.info(f"[{bot.username}] Post context ({len(context)} chars): {context[:120]}")
+
+    # Generate AI comment while we can still see the full post
+    comment_text = None
+    if api_key and context:
+        comment_text = _generate_ai_comment(api_key, context)
+        if comment_text:
+            log.info(f"[{bot.username}] AI comment: {comment_text[:80]}")
+
+    if not comment_text:
+        if fallback_comments:
+            comment_text = random.choice(fallback_comments)
+        else:
+            comment_text = "Love this 🔥"
+        log.info(f"[{bot.username}] Fallback comment: {comment_text[:60]}")
+
+    # Click the first (main post) reply button
     reply_btns = bot.driver.find_elements(By.CSS_SELECTOR, "svg[aria-label='Reply']")
     if not reply_btns:
         log.warning(f"[{bot.username}] No reply buttons found on {post_url}")
         return False
 
-    target_btn = reply_btns[len(reply_btns) // 2]  # middle button
+    # Use the first reply button (top-level post, not a comment reply)
+    target_btn = reply_btns[0]
 
     # Scroll to post and "read" it naturally before clicking
     bot.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", target_btn)
@@ -324,20 +411,6 @@ def _post_comment_on(bot, post_url: str, api_key: str, fallback_comments: list) 
             break
         except Exception:
             continue
-
-    # Extract context for AI
-    context = _extract_post_context(bot)
-
-    # Generate AI comment or fall back to static
-    comment_text = None
-    if api_key and context:
-        comment_text = _generate_ai_comment(api_key, context)
-        if comment_text:
-            log.info(f"[{bot.username}] AI comment: {comment_text[:60]}")
-
-    if not comment_text:
-        comment_text = random.choice(fallback_comments) if fallback_comments else "Love this 🔥"
-        log.info(f"[{bot.username}] Fallback comment: {comment_text[:60]}")
 
     # Find comment field
     textbox = None
@@ -362,20 +435,45 @@ def _post_comment_on(bot, post_url: str, api_key: str, fallback_comments: list) 
             pass
         return False
 
-    if not bot.paste_text(textbox, comment_text):
-        log.warning(f"[{bot.username}] Could not type comment")
-        return False
+    # Optionally attach an image based on pic_comment_ratio setting
+    use_pic = random.randint(1, 100) <= PIC_COMMENT_RATIO
+    if use_pic:
+        img_path = _pick_random_image()
+        if img_path:
+            try:
+                file_input = WebDriverWait(bot.driver, 5).until(
+                    EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
+                )
+                file_input.send_keys(os.path.abspath(img_path))
+                log.info(f"[{bot.username}] Pic comment: attached {os.path.basename(img_path)}")
+                time.sleep(3)  # wait for upload preview
+            except Exception as e:
+                log.warning(f"[{bot.username}] Pic comment upload failed: {e}")
+        else:
+            log.info(f"[{bot.username}] Pic comment skipped — no images in content/images/")
 
-    # Fire React input event so the Post button becomes enabled
+    # Re-find textbox after potential image upload
     try:
-        bot.driver.execute_script(
-            "arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true}));",
-            textbox
+        textbox = WebDriverWait(bot.driver, 5).until(
+            EC.presence_of_element_located((By.XPATH, '//div[@role="textbox"]'))
         )
     except Exception:
         pass
 
-    time.sleep(random.uniform(1.5, 3))
+    if not bot.paste_text(textbox, comment_text):
+        log.warning(f"[{bot.username}] Could not type comment")
+        return False
+
+    # Fire React events so the Post button becomes enabled
+    try:
+        bot.driver.execute_script("""
+            arguments[0].dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}));
+            arguments[0].dispatchEvent(new Event('change', {bubbles: true}));
+        """, textbox)
+    except Exception:
+        pass
+
+    time.sleep(random.uniform(2.5, 4))  # give React time to enable the submit button
     return _click_comment_post_button(bot, textbox)
 
 
@@ -439,14 +537,41 @@ def _find_enabled_submit_btn(driver):
                 continue
             text = (el.text or "").strip().lower()
             aria = (el.get_attribute("aria-label") or "").lower()
-            disabled = el.get_attribute("aria-disabled") == "true"
+            disabled = (el.get_attribute("aria-disabled") == "true"
+                        or el.get_attribute("disabled") is not None)
             if disabled:
                 continue
             if any(l == text or l in aria for l in labels):
                 return el
         except Exception:
             continue
-    return None
+
+    # Fallback: find any non-disabled button near a textbox (Threads uses icon-only send buttons)
+    try:
+        result = driver.execute_script("""
+            const textbox = document.querySelector('[role="textbox"]');
+            if (!textbox) return null;
+            // Walk up to find a form-like container, then look for any enabled button
+            let container = textbox;
+            for (let i = 0; i < 8; i++) {
+                container = container.parentElement;
+                if (!container) break;
+                const btns = container.querySelectorAll('[role="button"], button');
+                for (const b of btns) {
+                    const disabled = b.getAttribute('aria-disabled') === 'true' || b.disabled;
+                    const visible = b.offsetWidth > 0 && b.offsetHeight > 0;
+                    // Skip if it looks like a cancel/close button
+                    const txt = (b.textContent || '').trim().toLowerCase();
+                    if (!disabled && visible && txt !== 'cancel' && txt !== 'close') {
+                        return b;
+                    }
+                }
+            }
+            return null;
+        """)
+        return result
+    except Exception:
+        return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -476,9 +601,9 @@ def run_follow_batch(bot, tier1_users: list):
 
 def _click_follow_button(bot) -> bool:
     for xpath in [
-        '//div[@role="button" and text()="Follow"]',
-        '//span[text()="Follow"]/ancestor::div[@role="button"]',
+        '//*[@role="button" and normalize-space(.)="Follow"]',
         '//button[normalize-space()="Follow"]',
+        '//*[@role="button" and .//span[normalize-space(.)="Follow"]]',
     ]:
         try:
             el = WebDriverWait(bot.driver, 6).until(EC.element_to_be_clickable((By.XPATH, xpath)))
@@ -513,15 +638,17 @@ def run_due_unfollows(bot):
 
 def _click_unfollow_button(bot) -> bool:
     for xpath in [
-        '//div[@role="button" and text()="Following"]',
-        '//div[@role="button" and text()="Unfollow"]',
-        '//span[text()="Following"]/ancestor::div[@role="button"]',
+        '//*[@role="button" and normalize-space(.)="Following"]',
+        '//*[@role="button" and .//span[normalize-space(.)="Following"]]',
     ]:
         try:
             el = WebDriverWait(bot.driver, 5).until(EC.element_to_be_clickable((By.XPATH, xpath)))
             bot.smart_click(el)
             time.sleep(1.5)
-            for confirm in ['//div[@role="button" and text()="Unfollow"]', '//button[normalize-space()="Unfollow"]']:
+            for confirm in [
+                '//*[@role="button" and normalize-space(.)="Unfollow"]',
+                '//button[normalize-space()="Unfollow"]',
+            ]:
                 try:
                     c = WebDriverWait(bot.driver, 3).until(EC.element_to_be_clickable((By.XPATH, confirm)))
                     c.click()

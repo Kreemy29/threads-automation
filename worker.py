@@ -20,6 +20,8 @@ from config import (
     POST_CYCLE_MAX,
     OUTREACH_COMMENTS_MIN,
     OUTREACH_COMMENTS_MAX,
+    FOLLOW_BATCH_SIZE,
+    TEXT_POSTS_PER_CYCLE,
     WARMUP_DURATION,
 )
 from core.bot import ThreadsBot
@@ -82,7 +84,7 @@ def run_account(username, adspower_id, state=None):
         bot.open_browser()
 
         if not bot.is_logged_in():
-            log.error("Not logged in to Threads — aborting. Log in manually first.")
+            log.error("Not logged in to Threads — pausing. Log in via AdsPower manually, then click Reset in the UI.")
             db.update_account(username, state="error", notes="not logged in")
             return
 
@@ -90,6 +92,13 @@ def run_account(username, adspower_id, state=None):
         if state is None or state == "running":
             account = db.get_account(username)
             state = account.get("state", "pending")
+
+        # Treat error as pending — retry from the top
+        if state == "error":
+            log.info("Account was in error state — resetting to pending for retry")
+            db.update_account(username, state="pending", notes="", retry_count=0)
+            state = "pending"
+
         log.info(f"Account state: {state}")
 
         # ── SETUP ────────────────────────────────────────────────────
@@ -175,10 +184,11 @@ def _run_active_loop(bot, username, log, media_folder: str = ""):
         db.log_action(username, "mother_repost", "ok" if ok else "failed")
         time.sleep(random.uniform(30, 60))
 
-    next_post_time = datetime.utcnow()
-    next_follow_time = datetime.utcnow() + timedelta(minutes=random.randint(20, 40))
-    next_unfollow_check = datetime.utcnow() + timedelta(minutes=10)
-    next_comment_time = _random_comment_time()
+    next_post_time       = datetime.utcnow()
+    next_follow_time     = datetime.utcnow() + timedelta(minutes=random.randint(20, 40))
+    next_unfollow_check  = datetime.utcnow() + timedelta(minutes=10)
+    next_comment_time    = _random_comment_time()
+    cycle_num            = 0
 
     log.info("Entering 24-hour active SOP loop")
 
@@ -187,26 +197,49 @@ def _run_active_loop(bot, username, log, media_folder: str = ""):
 
         # ── Posting cycle ──────────────────────────────────────────
         if now >= next_post_time:
-            log.info("Running posting cycle...")
-            results = run_posting_cycle(bot, media_folder=media_folder)
-            ok_count = sum(1 for r in results if r)
-            db.log_action(username, "posting_cycle", "ok", f"{ok_count}/{len(results)} posted")
+            cycle_num += 1
+            plan = _build_cycle_plan(cycle_num)
+            _log_cycle_plan(log, username, plan)
+
+            # Text posts — with mood-based browsing between each
+            text_results = []
+            for i in range(plan["text_posts"]):
+                log.info(f"[{username}] Posting text post {i+1}/{plan['text_posts']}…")
+                ok = _post_one_text(bot, media_folder)
+                text_results.append(ok)
+                _log_step(log, username, f"text post {i+1}", ok)
+                if i < plan["text_posts"] - 1:
+                    _active_browse(bot, username, log, seconds=random.randint(40, 120))
+
+            # Image post
+            log.info(f"[{username}] Posting image post…")
+            img_ok = _post_one_image(bot, media_folder)
+            _log_step(log, username, "image post", img_ok)
+
+            ok_count = sum(text_results) + img_ok
+            total    = len(text_results) + 1
+            db.log_action(username, "posting_cycle", "ok" if ok_count == total else "partial",
+                          f"{ok_count}/{total} posted")
+
             interval = random.randint(POST_CYCLE_MIN, POST_CYCLE_MAX)
             next_post_time = now + timedelta(seconds=interval)
-            log.info(f"Next posting cycle in {interval//60} min")
+            log.info(f"[{username}] Cycle {cycle_num} done: {ok_count}/{total} ✓ — next in {interval//60} min")
 
         # ── Outreach comments ──────────────────────────────────────
         if now >= next_comment_time:
-            daily = db.get_daily_counts(username)
-            done = run_outreach_comments(bot, daily["comments"])  # uses GEMINI_API_KEY from config
-            log.info(f"Outreach: {done} comments posted today total")
+            daily   = db.get_daily_counts(username)
+            planned = random.randint(OUTREACH_COMMENTS_MIN, OUTREACH_COMMENTS_MAX)
+            log.info(f"[{username}] Outreach plan: {planned} comments (done today: {daily['comments']})")
+            done = run_outreach_comments(bot, daily["comments"])
+            _log_step(log, username, f"outreach comments ({done}/{planned})", done > 0)
             next_comment_time = _random_comment_time()
 
         # ── Follow batch ───────────────────────────────────────────
         if now >= next_follow_time and tier1_users:
+            log.info(f"[{username}] Follow plan: up to {FOLLOW_BATCH_SIZE} tier-1 users")
             run_follow_batch(bot, tier1_users)
             next_follow_time = now + timedelta(minutes=random.randint(45, 90))
-            log.info(f"Next follow batch in ~{(next_follow_time - now).seconds // 60} min")
+            log.info(f"[{username}] Next follow batch in ~{(next_follow_time - now).seconds // 60} min")
 
         # ── Unfollow check ─────────────────────────────────────────
         if now >= next_unfollow_check:
@@ -215,6 +248,68 @@ def _run_active_loop(bot, username, log, media_folder: str = ""):
 
         # ── Idle scroll (keep session alive) ──────────────────────
         _idle_scroll(bot, seconds=random.randint(30, 90))
+
+
+def _build_cycle_plan(cycle_num):
+    return {
+        "cycle":      cycle_num,
+        "text_posts": TEXT_POSTS_PER_CYCLE,
+        "image_post": 1,
+    }
+
+
+def _log_cycle_plan(log, username, plan):
+    log.info(
+        f"[{username}] ── Cycle {plan['cycle']} plan: "
+        f"{plan['text_posts']} text posts + {plan['image_post']} image post"
+    )
+
+
+def _log_step(log, username, step, ok):
+    status = "✓" if ok else "✗"
+    log.info(f"[{username}]   {step}: {status}")
+
+
+def _post_one_text(bot, media_folder):
+    from tasks.posting import post_text, _load_lines, _generate_post
+    from config import GEMINI_API_KEY
+    import os, random as _r
+    examples = _load_lines(os.path.join(
+        os.path.dirname(__file__), "content", "text_posts.txt"
+    ))
+    if not examples:
+        return False
+    example = _r.choice(examples)
+    text = _generate_post(GEMINI_API_KEY, example) or example
+    return post_text(bot, text)
+
+
+def _post_one_image(bot, media_folder):
+    from tasks.posting import post_image
+    try:
+        return post_image(bot, media_folder=media_folder)
+    except Exception:
+        return False
+
+
+def _active_browse(bot, username, log, seconds=60):
+    """Short mood-based feed browse used between active SOP actions."""
+    from tasks.warmup import _new_mood
+    mood = _new_mood()
+    log.info(f"[{username}]   browsing feed ({mood['name']} mood, {seconds}s)")
+    end = time.time() + seconds
+    try:
+        bot.go_home()
+        while time.time() < end:
+            bot.driver.execute_script(
+                f"window.scrollBy(0, {random.randint(mood['scroll_min'], mood['scroll_max'])});"
+            )
+            if random.random() < mood["read_chance"]:
+                time.sleep(random.uniform(mood["read_min"], mood["read_max"]))
+            else:
+                time.sleep(random.uniform(mood["gap_min"], mood["gap_max"]))
+    except Exception:
+        pass
 
 
 def _random_comment_time():

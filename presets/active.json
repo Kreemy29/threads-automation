@@ -1,0 +1,23 @@
+{
+  "text_posts": 4,
+  "cycle_min": 30,
+  "cycle_max": 60,
+  "image_post": true,
+  "active_likes_min": 1,
+  "active_likes_max": 5,
+  "warmup_duration": 5,
+  "warmup_targets": "",
+  "warmup_likes_min": 2,
+  "warmup_likes_max": 3,
+  "warmup_max_follows": 4,
+  "comments_min": 4,
+  "comments_max": 6,
+  "pic_comment_ratio": 20,
+  "follow_batch": 20,
+  "unfollow_hours": 2,
+  "outreach_targets": "",
+  "batch_size": 15,
+  "mother_post_url": "",
+  "adspower_api_key": "",
+  "gemini_key": ""
+}

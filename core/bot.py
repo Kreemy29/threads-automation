@@ -34,15 +34,30 @@ class ThreadsBot:
         options = webdriver.ChromeOptions()
         options.add_experimental_option("debuggerAddress", selenium_address)
 
+        service = None
         if webdriver_path and os.path.exists(webdriver_path):
             service = Service(executable_path=webdriver_path)
-            self.driver = webdriver.Chrome(service=service, options=options)
+
+        # Chrome needs a few seconds to fully start and open its debug port.
+        # Retry the connection up to 10 times before giving up.
+        last_err = None
+        for attempt in range(10):
+            try:
+                self.driver = (
+                    webdriver.Chrome(service=service, options=options)
+                    if service else
+                    webdriver.Chrome(options=options)
+                )
+                break
+            except Exception as e:
+                last_err = e
+                wait = 3 + attempt * 2  # 3, 5, 7, … seconds
+                self.log.info(f"Chrome not ready yet (attempt {attempt + 1}/10) — retrying in {wait}s")
+                time.sleep(wait)
         else:
-            self.driver = webdriver.Chrome(options=options)
+            raise RuntimeError(f"Could not connect to Chrome after 10 attempts: {last_err}")
 
         self.log.info(f"Browser opened for {self.username}")
-
-        # Always navigate to Threads on startup so we have a clean known page
         self._navigate_to_threads()
         return self.driver
 

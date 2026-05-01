@@ -1,11 +1,13 @@
 """
 Posting tasks:
-  - 4 text posts per cycle (from text_posts.txt)
+  - 4 text posts per cycle, AI-generated in the style of example posts
   - 1 image post per cycle (random image + caption from captions.txt)
 """
 import os
 import random
 import time
+
+import requests
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -13,6 +15,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), "..", "content")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
 
 _PLACEHOLDER_MARKERS = (
@@ -62,6 +65,40 @@ def _pick_image(media_folder: str = "") -> str:
             f"No images found in media_folder='{media_folder}' or content/images/"
         )
     return random.choice(candidates)
+
+
+# ------------------------------------------------------------------
+# AI post generation
+# ------------------------------------------------------------------
+
+def _generate_post(api_key: str, example: str):
+    """Ask Gemini to write a new post inspired by the example. Returns None on failure."""
+    if not api_key:
+        return None
+    prompt = (
+        "You write short, punchy Threads/Instagram captions for a flirty, confident girl account. "
+        "Here is one example of the style and vibe:\n\n"
+        f'"{example}"\n\n'
+        "Write ONE new caption in the exact same style — same tone, same energy, same length (1-3 sentences max). "
+        "Do NOT copy the example. Make it feel fresh and original. "
+        "No hashtags. No quotes around the output. Output ONLY the caption text."
+    )
+    try:
+        resp = requests.post(
+            GEMINI_URL,
+            params={"key": api_key},
+            headers={"Content-Type": "application/json"},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": 120, "temperature": 1.0},
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return text.strip('"').strip("'") or None
+    except Exception:
+        return None
 
 
 # ------------------------------------------------------------------
@@ -162,18 +199,30 @@ def post_image(bot, image_path=None, caption=None, media_folder: str = ""):
 # ------------------------------------------------------------------
 
 def run_posting_cycle(bot, media_folder: str = ""):
+    from config import GEMINI_API_KEY, TEXT_POSTS_PER_CYCLE
     log = bot.log
-    log.info(f"[{bot.username}] Starting posting cycle (4 text + 1 image)")
+    n = TEXT_POSTS_PER_CYCLE or 4
+    log.info(f"[{bot.username}] Starting posting cycle ({n} text + 1 image)")
 
-    posts = _load_lines("text_posts.txt")
-    selected = random.sample(posts, min(4, len(posts)))
-
+    examples = _load_lines("text_posts.txt")
     results = []
-    for i, text in enumerate(selected, 1):
+
+    for i in range(1, n + 1):
+        example = random.choice(examples)
+        generated = _generate_post(GEMINI_API_KEY, example)
+        if generated:
+            log.info(f"[{bot.username}] AI post {i}/{n}: {generated[:60]}…")
+            text = generated
+        else:
+            # Fallback: use the example directly
+            text = example
+            log.info(f"[{bot.username}] Fallback post {i}/{n}: {text[:60]}…")
+
         ok = post_text(bot, text)
         results.append(ok)
-        log.info(f"[{bot.username}] Text post {i}/4: {'ok' if ok else 'failed'}")
-        time.sleep(random.uniform(30, 90))
+        log.info(f"[{bot.username}] Text post {i}/{n}: {'ok' if ok else 'failed'}")
+        if i < n:
+            time.sleep(random.uniform(30, 90))
 
     ok = post_image(bot, media_folder=media_folder)
     results.append(ok)

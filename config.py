@@ -1,4 +1,5 @@
 import os
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -8,39 +9,31 @@ ADSPOWER_API_KEY  = os.getenv("ADSPOWER_API_KEY", "")
 DEEPSEEK_API_KEY  = os.getenv("DEEPSEEK_API_KEY", "")
 GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
 
-# URL of the mother account's Threads post (the one that contains the Telegram link).
-# Spam pages repost/quote THIS post — they never post the Telegram URL directly.
 MOTHER_POST_URL = os.getenv("MOTHER_POST_URL", "")
 
-# How many accounts run at once before rotating to the next batch
 BATCH_SIZE = 15
 
-# Warmup duration in seconds (1 hour)
 WARMUP_DURATION     = 3600
-WARMUP_LIKES_MIN    = 2      # likes per profile visit during warmup
+WARMUP_LIKES_MIN    = 2
 WARMUP_LIKES_MAX    = 6
-WARMUP_MAX_FOLLOWS  = 8      # max follows during warmup session
+WARMUP_MAX_FOLLOWS  = 8
 
-# Post cycle: every 30-60 minutes
 POST_CYCLE_MIN = 1800
 POST_CYCLE_MAX = 3600
 
-# Text posts per cycle
 TEXT_POSTS_PER_CYCLE = 4
 
-# Likes during active SOP (per feed scroll session)
 ACTIVE_LIKES_MIN = 1
 ACTIVE_LIKES_MAX = 5
 
-# Outreach comments per day
-OUTREACH_COMMENTS_MIN = 2
-OUTREACH_COMMENTS_MAX = 4
+OUTREACH_COMMENTS_MIN = 4
+OUTREACH_COMMENTS_MAX = 6
 
-# Follow/unfollow
+PIC_COMMENT_RATIO = 20  # % of outreach comments that include an image
+
 FOLLOW_BATCH_SIZE = 20
 UNFOLLOW_AFTER_SECONDS = 7200
 
-# Top US models to follow during warmup (Threads profile URLs)
 WARMUP_TARGETS = [
     "https://www.threads.com/@amberrosee",
     "https://www.threads.com/@iamcardib",
@@ -49,9 +42,43 @@ WARMUP_TARGETS = [
     "https://www.threads.com/@chrissy_teigen",
 ]
 
-# Outreach targets — top models whose recent posts we comment on
 OUTREACH_TARGETS = [
     "https://www.threads.com/@bellahadid",
     "https://www.threads.com/@emrata",
     "https://www.threads.com/@chrissy_teigen",
 ]
+
+# Override defaults with UI-saved settings (written by the GUI on Start)
+_active = os.path.join(os.path.dirname(__file__), "presets", "active.json")
+if os.path.exists(_active):
+    try:
+        with open(_active, "r", encoding="utf-8") as _f:
+            _s = json.load(_f)
+        WARMUP_DURATION        = _s.get("warmup_duration", WARMUP_DURATION // 60) * 60
+        WARMUP_LIKES_MIN       = _s.get("warmup_likes_min", WARMUP_LIKES_MIN)
+        WARMUP_LIKES_MAX       = _s.get("warmup_likes_max", WARMUP_LIKES_MAX)
+        WARMUP_MAX_FOLLOWS     = _s.get("warmup_max_follows", WARMUP_MAX_FOLLOWS)
+        POST_CYCLE_MIN         = _s.get("cycle_min", POST_CYCLE_MIN // 60) * 60
+        POST_CYCLE_MAX         = _s.get("cycle_max", POST_CYCLE_MAX // 60) * 60
+        OUTREACH_COMMENTS_MIN  = _s.get("comments_min", OUTREACH_COMMENTS_MIN)
+        OUTREACH_COMMENTS_MAX  = _s.get("comments_max", OUTREACH_COMMENTS_MAX)
+        FOLLOW_BATCH_SIZE      = _s.get("follow_batch", FOLLOW_BATCH_SIZE)
+        UNFOLLOW_AFTER_SECONDS = _s.get("unfollow_hours", UNFOLLOW_AFTER_SECONDS // 3600) * 3600
+        ACTIVE_LIKES_MIN       = _s.get("active_likes_min", ACTIVE_LIKES_MIN)
+        ACTIVE_LIKES_MAX       = _s.get("active_likes_max", ACTIVE_LIKES_MAX)
+        TEXT_POSTS_PER_CYCLE   = _s.get("text_posts", TEXT_POSTS_PER_CYCLE)
+        PIC_COMMENT_RATIO      = _s.get("pic_comment_ratio", PIC_COMMENT_RATIO)
+        MOTHER_POST_URL        = _s.get("mother_post_url", MOTHER_POST_URL)
+        BATCH_SIZE             = _s.get("batch_size", BATCH_SIZE)
+        if _s.get("adspower_api_key"):
+            ADSPOWER_API_KEY   = _s["adspower_api_key"]
+        if _s.get("gemini_key"):
+            GEMINI_API_KEY     = _s["gemini_key"]
+        _raw_w = [h.strip().lstrip("@") for h in _s.get("warmup_targets", "").split(",") if h.strip()]
+        if _raw_w:
+            WARMUP_TARGETS = [f"https://www.threads.net/@{h}" for h in _raw_w]
+        _raw_o = [h.strip().lstrip("@") for h in _s.get("outreach_targets", "").split(",") if h.strip()]
+        if _raw_o:
+            OUTREACH_TARGETS = [f"https://www.threads.net/@{h}" for h in _raw_o]
+    except Exception:
+        pass
