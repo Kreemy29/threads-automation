@@ -232,14 +232,15 @@ def _generate_ai_comment(api_key: str, context: str):
         return None
 
     prompt = (
-        "You are a real girl on social media leaving a short comment on someone else's Threads post. "
-        "The post content and some comments are shown below.\n\n"
+        "You are a real LA girl leaving a comment on someone's Threads post. "
+        "You talk like someone from Los Angeles — use natural US/LA slang: "
+        "lowkey, slay, no cap, periodt, it's giving, rent free, understood the assignment, fr fr, bestie, etc. "
+        "Mix in 1-3 emojis naturally (not all at the end). Keep it short — 1 sentence, 2 max. "
+        "Sound like a real person hyping someone up or reacting authentically — "
+        "reference something specific from the post, don't be generic. "
+        "No hashtags. No quotes around your output. ONLY output the comment.\n\n"
         f"{context}\n\n"
-        "Write ONE comment that directly responds to what the post is actually about. "
-        "Make it specific — reference the topic, the vibe, or something said. "
-        "1-2 sentences max. Casual and genuine, flirty or supportive depending on the post. "
-        "1 emoji only if it fits naturally. No hashtags. No generic lines like 'Love this' or 'So true'. "
-        "ONLY output the comment text, nothing else."
+        "Your comment:"
     )
 
     try:
@@ -250,8 +251,8 @@ def _generate_ai_comment(api_key: str, context: str):
             json={
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
-                    "maxOutputTokens": 80,
-                    "temperature": 0.9,
+                    "maxOutputTokens": 100,
+                    "temperature": 1.1,
                 },
             },
             timeout=25,
