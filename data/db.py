@@ -87,6 +87,9 @@ def load_accounts_from_file(filepath):
     """
     conn = _connect()
     c = conn.cursor()
+    # Remove any stale records whose username starts with "@" (from before the lstrip fix)
+    c.execute("DELETE FROM accounts WHERE username LIKE '@%'")
+    conn.commit()
     with open(filepath, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()

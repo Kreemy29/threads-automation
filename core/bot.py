@@ -319,38 +319,49 @@ class ThreadsBot:
 
     def click_post_button(self):
         """Click the Post submit button in the compose dialog."""
-        attempts = [
-            (By.XPATH, '//*[@role="button" and normalize-space(.)="Post" and @aria-disabled!="true"]'),
-            (By.XPATH, '//*[@role="button" and normalize-space(.)="Post"]'),
-            (By.XPATH, '//span[normalize-space(.)="Post"]/ancestor::*[@role="button"]'),
-        ]
-        for by, sel in attempts:
-            try:
-                el = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((by, sel)))
-                self.smart_click(el)
-                time.sleep(5)
-                return True
-            except Exception:
-                continue
-        # JS fallback — walks every button/role=button, matches on trimmed full text
+        # JS: find the Post button INSIDE the compose modal only.
+        # Threads has a "Post" nav button on the sidebar — we must NOT click that.
+        # The compose modal is the deepest dialog/sheet on the page.
         try:
             result = self.driver.execute_script("""
-                const candidates = document.querySelectorAll('[role="button"], button');
-                for (const b of candidates) {
-                    const txt = (b.innerText || b.textContent || '').trim();
-                    const disabled = b.getAttribute('aria-disabled') === 'true' || b.disabled;
-                    if (!disabled && (txt === 'Post' || txt === 'post') && b.offsetWidth > 0) {
-                        b.click(); return true;
+                // Find the compose modal — Threads renders it as a div with role="dialog"
+                // or as the sheet that contains the textbox.
+                const textbox = document.querySelector('[role="textbox"]');
+                if (!textbox) return 'no-textbox';
+
+                // Walk up from textbox until we find a container with buttons
+                let container = textbox;
+                for (let i = 0; i < 12; i++) {
+                    container = container.parentElement;
+                    if (!container) break;
+
+                    const btns = Array.from(container.querySelectorAll('[role="button"], button'));
+                    for (const b of btns) {
+                        const txt = (b.innerText || b.textContent || '').trim();
+                        const disabled = b.getAttribute('aria-disabled') === 'true' || b.disabled;
+                        if (!disabled && txt === 'Post' && b.offsetWidth > 0) {
+                            b.click();
+                            return 'clicked';
+                        }
                     }
                 }
-                return false;
+                return 'not-found';
             """)
-            if result:
-                time.sleep(5)
-                return True
-        except Exception:
-            pass
-        self.log.warning(f"[{self.username}] click_post_button: no enabled Post button found")
+            if result == 'clicked':
+                # Verify the modal actually closed (textbox gone = post submitted)
+                try:
+                    WebDriverWait(self.driver, 6).until_not(
+                        EC.presence_of_element_located((By.XPATH, '//div[@role="textbox"]'))
+                    )
+                    time.sleep(2)
+                    return True
+                except Exception:
+                    self.log.warning(f"[{self.username}] Clicked Post but dialog still open — may have failed")
+                    time.sleep(3)
+                    return False
+            self.log.warning(f"[{self.username}] click_post_button: {result}")
+        except Exception as e:
+            self.log.warning(f"[{self.username}] click_post_button JS error: {e}")
         return False
 
     # ------------------------------------------------------------------

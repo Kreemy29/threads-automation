@@ -127,7 +127,16 @@ def post_text(bot, text=None):
             time.sleep(2)
             continue
 
-        time.sleep(1)
+        # Fire React synthetic events so the Post button becomes enabled
+        try:
+            bot.driver.execute_script("""
+                arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText'}));
+                arguments[0].dispatchEvent(new Event('change', {bubbles:true}));
+            """, textbox)
+        except Exception:
+            pass
+
+        time.sleep(2)  # wait for React to enable the Post button
         if bot.click_post_button():
             log.info(f"[{bot.username}] Text post published")
             return True
@@ -185,7 +194,15 @@ def post_image(bot, image_path=None, caption=None, media_folder: str = ""):
         if not bot.paste_text(textbox, caption):
             log.warning(f"[{bot.username}] Caption paste failed (attempt {attempt+1})")
 
-        time.sleep(1)
+        try:
+            bot.driver.execute_script("""
+                arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText'}));
+                arguments[0].dispatchEvent(new Event('change', {bubbles:true}));
+            """, textbox)
+        except Exception:
+            pass
+
+        time.sleep(2)
         if bot.click_post_button():
             log.info(f"[{bot.username}] Image post published")
             return True
