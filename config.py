@@ -20,6 +20,7 @@ WARMUP_MAX_FOLLOWS  = 8
 
 POST_CYCLE_MIN = 1800
 POST_CYCLE_MAX = 3600
+SESSION_DURATION = 1800  # fixed active session length per account (seconds)
 
 TEXT_POSTS_PER_CYCLE = 4
 
@@ -69,6 +70,7 @@ if os.path.exists(_active):
         ACTIVE_LIKES_MIN       = _s.get("active_likes_min", ACTIVE_LIKES_MIN)
         ACTIVE_LIKES_MAX       = _s.get("active_likes_max", ACTIVE_LIKES_MAX)
         TEXT_POSTS_PER_CYCLE   = _s.get("text_posts", TEXT_POSTS_PER_CYCLE)
+        SESSION_DURATION       = _s.get("session_duration", SESSION_DURATION // 60) * 60
         PIC_COMMENT_RATIO      = _s.get("pic_comment_ratio", PIC_COMMENT_RATIO)
         MOTHER_POST_URL        = _s.get("mother_post_url", MOTHER_POST_URL)
         BATCH_SIZE             = _s.get("batch_size", BATCH_SIZE)

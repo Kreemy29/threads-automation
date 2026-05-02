@@ -515,11 +515,8 @@ class SettingsTab(ctk.CTkFrame):
         self.text_posts       = IntEntry(post_card, "Text posts per cycle", "4")
         self.text_posts.pack(fill="x", padx=12, pady=4)
 
-        self.cycle_min        = IntEntry(post_card, "Cycle interval MIN (minutes)", "30")
-        self.cycle_min.pack(fill="x", padx=12, pady=4)
-
-        self.cycle_max        = IntEntry(post_card, "Cycle interval MAX (minutes)", "60")
-        self.cycle_max.pack(fill="x", padx=12, pady=4)
+        self.session_duration = IntEntry(post_card, "Session duration (minutes)", "30")
+        self.session_duration.pack(fill="x", padx=12, pady=4)
 
         self.image_post_var   = ctk.BooleanVar(value=True)
         img_row = ctk.CTkFrame(post_card, fg_color="transparent")
@@ -588,8 +585,7 @@ class SettingsTab(ctk.CTkFrame):
     def _to_dict(self) -> dict:
         return {
             "text_posts":           self.text_posts.get(),
-            "cycle_min":            self.cycle_min.get(),
-            "cycle_max":            self.cycle_max.get(),
+            "session_duration":     self.session_duration.get(),
             "image_post":           self.image_post_var.get(),
             "active_likes_min":     self.active_likes_min.get(),
             "active_likes_max":     self.active_likes_max.get(),
@@ -612,8 +608,7 @@ class SettingsTab(ctk.CTkFrame):
 
     def _from_dict(self, d: dict):
         self.text_posts.set(d.get("text_posts", 4))
-        self.cycle_min.set(d.get("cycle_min", 30))
-        self.cycle_max.set(d.get("cycle_max", 60))
+        self.session_duration.set(d.get("session_duration", 30))
         self.image_post_var.set(d.get("image_post", True))
         self.active_likes_min.set(d.get("active_likes_min", 1))
         self.active_likes_max.set(d.get("active_likes_max", 5))
@@ -995,8 +990,7 @@ class App(ctk.CTk):
 
     def _apply_settings(self, s: dict):
         import config
-        config.POST_CYCLE_MIN          = s["cycle_min"] * 60
-        config.POST_CYCLE_MAX          = s["cycle_max"] * 60
+        config.SESSION_DURATION        = s["session_duration"] * 60
         config.OUTREACH_COMMENTS_MIN   = s["comments_min"]
         config.OUTREACH_COMMENTS_MAX   = s["comments_max"]
         config.PIC_COMMENT_RATIO       = s.get("pic_comment_ratio", 20)

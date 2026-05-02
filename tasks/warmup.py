@@ -1,8 +1,14 @@
 """
-Warmup phase — structured plan-based execution.
+Warmup phase — interleaved browsing + follows.
 
-At the start of each warmup session the bot builds a concrete plan from settings,
-announces it, then executes each phase and validates success/failure.
+Execution model:
+  1. Split follow targets into small batches (1–3 each).
+  2. Distribute those batches as checkpoints spread randomly across
+     the warmup window.
+  3. Browse feed between checkpoints with mood shifts.
+  4. At each checkpoint: visit profiles, like + follow, return to feed.
+
+Warmup always runs to completion before the active cycle starts.
 """
 import time
 import random
@@ -24,77 +30,170 @@ def run_warmup(bot, follow_list: list = None):
     targets = _resolve_targets(follow_list) or list(WARMUP_TARGETS)
     random.shuffle(targets)
 
-    # ── Build the plan ──────────────────────────────────────────────────────
-    follows_planned  = min(WARMUP_MAX_FOLLOWS, len(targets))
-    likes_per_visit  = random.randint(WARMUP_LIKES_MIN, WARMUP_LIKES_MAX)
-    likes_planned    = follows_planned * likes_per_visit
-    browse_minutes   = max(1, (WARMUP_DURATION - follows_planned * 45) // 60)
+    follows_planned = min(WARMUP_MAX_FOLLOWS, len(targets))
+    likes_per_visit = random.randint(WARMUP_LIKES_MIN, WARMUP_LIKES_MAX)
+    total_window    = WARMUP_DURATION  # seconds
 
     plan = {
-        "follows":  {"planned": follows_planned,  "done": 0, "failed": 0},
-        "likes":    {"planned": likes_planned,     "done": 0, "failed": 0},
-        "browse_minutes": browse_minutes,
+        "follows": {"planned": follows_planned, "done": 0, "failed": 0},
+        "likes":   {"planned": follows_planned * likes_per_visit, "done": 0, "failed": 0},
     }
+
+    # Split targets into small random batches of 1–3
+    batches = _split_batches(targets[:follows_planned], min_size=1, max_size=3)
 
     log.info(
         f"[{bot.username}] Warmup plan: "
-        f"follow {follows_planned} accounts | "
-        f"like ~{likes_planned} posts ({likes_per_visit}/profile) | "
-        f"browse feed ~{browse_minutes} min (with mood shifts)"
+        f"follow {follows_planned} accounts in {len(batches)} batch(es) | "
+        f"like ~{likes_per_visit}/profile | "
+        f"total window ~{total_window//60}m (follows interleaved with feed browsing)"
     )
 
-    # ── Phase 1: Visit each target with mood-based browsing between visits ──
-    log.info(f"[{bot.username}] ── Phase 1: visiting & following {follows_planned} profiles")
-    for i, url in enumerate(targets[:follows_planned], 1):
-        # Brief mood-based feed browse before each profile (except the first)
-        if i > 1:
+    # Place each follow batch at a random checkpoint inside the window.
+    # Reserve ~45s per profile for visiting + liking + following.
+    profile_cost = follows_planned * 45
+    browse_budget = max(60, total_window - profile_cost)
+
+    # Generate sorted checkpoint times (seconds from now)
+    checkpoints = sorted(random.sample(
+        range(30, browse_budget, max(1, browse_budget // (len(batches) + 1))),
+        min(len(batches), browse_budget // 60)
+    )) if len(batches) > 0 else []
+
+    # Pad/trim to match number of batches
+    while len(checkpoints) < len(batches):
+        checkpoints.append(random.randint(checkpoints[-1] + 30 if checkpoints else 30, browse_budget))
+    checkpoints = sorted(checkpoints[:len(batches)])
+
+    log.info(
+        f"[{bot.username}] Follow checkpoints at: "
+        + ", ".join(f"{s//60}m{s%60:02d}s" for s in checkpoints)
+    )
+
+    # ── Main warmup loop ────────────────────────────────────────────────────
+    start_time     = time.time()
+    end_time       = start_time + total_window
+    batch_index    = 0
+    checkpoint_abs = [start_time + s for s in checkpoints]
+
+    bot.go_home()
+    mood = _new_mood()
+    mood_ticks     = 0
+    mood_shift_at  = random.randint(4, 8)
+
+    log.info(f"[{bot.username}] ── Starting interleaved warmup browse (mood: {mood['name']}) ──")
+
+    while time.time() < end_time:
+        now = time.time()
+
+        # ── Fire next follow batch when its checkpoint arrives ──────────────
+        if batch_index < len(checkpoint_abs) and now >= checkpoint_abs[batch_index]:
+            batch = batches[batch_index]
+            batch_index += 1
+            log.info(
+                f"[{bot.username}] ── Follow checkpoint {batch_index}/{len(batches)}: "
+                f"{len(batch)} profile(s)"
+            )
+            for j, url in enumerate(batch, 1):
+                log.info(f"[{bot.username}]   [{j}/{len(batch)}] {url}")
+                try:
+                    bot.go(url)
+                    time.sleep(random.uniform(2, 4))
+
+                    n = _like_visible_posts(bot, likes_per_visit)
+                    plan["likes"]["done"] += n
+                    if n < likes_per_visit:
+                        plan["likes"]["failed"] += likes_per_visit - n
+                    log.info(f"[{bot.username}]   Liked {n}/{likes_per_visit} {'✓' if n else '✗'}")
+
+                    if _click_follow(bot):
+                        plan["follows"]["done"] += 1
+                        log.info(f"[{bot.username}]   Followed ✓")
+                    else:
+                        plan["follows"]["failed"] += 1
+                        log.info(f"[{bot.username}]   Follow failed ✗")
+
+                    time.sleep(random.uniform(3, 7))
+
+                except Exception as e:
+                    err = str(e)
+                    if "invalid session id" in err or "not connected to DevTools" in err or "disconnected" in err:
+                        log.error(f"[{bot.username}] Browser session lost — aborting warmup")
+                        _log_plan_summary(bot, plan)
+                        raise
+                    plan["follows"]["failed"] += 1
+                    log.warning(f"[{bot.username}]   Error on {url}: {e}")
+
+            # Return to feed after batch
+            bot.go_home()
             mood = _new_mood()
-            browse_secs = random.randint(20, 50)
-            log.info(f"[{bot.username}]   → feed browse ({mood['name']} mood, {browse_secs}s)")
-            _browse_feed(bot, time.time() + browse_secs, mood)
+            log.info(f"[{bot.username}]   Back to feed (mood: {mood['name']})")
+            continue  # skip the scroll step this tick
 
-        log.info(f"[{bot.username}]   [{i}/{follows_planned}] {url}")
+        # ── Regular feed scroll ─────────────────────────────────────────────
         try:
-            bot.go(url)
-            time.sleep(random.uniform(2, 4))
+            mood_ticks += 1
+            if mood_ticks >= mood_shift_at:
+                mood = _new_mood()
+                mood_ticks = 0
+                mood_shift_at = random.randint(4, 8)
+                log.info(f"[{bot.username}]   Mood → {mood['name']}")
 
-            # Like posts on this profile
-            n = _like_visible_posts(bot, likes_per_visit)
-            plan["likes"]["done"] += n
-            if n < likes_per_visit:
-                plan["likes"]["failed"] += likes_per_visit - n
-            log.info(f"[{bot.username}]   Liked {n}/{likes_per_visit} posts {'✓' if n else '✗'}")
+            scroll_px = random.randint(mood["scroll_min"], mood["scroll_max"])
+            bot.driver.execute_script(f"window.scrollBy(0, {scroll_px});")
 
-            # Follow
-            if _click_follow(bot):
-                plan["follows"]["done"] += 1
-                log.info(f"[{bot.username}]   Followed ✓")
+            if random.random() < mood["read_chance"]:
+                time.sleep(random.uniform(mood["read_min"], mood["read_max"]))
             else:
-                plan["follows"]["failed"] += 1
-                log.info(f"[{bot.username}]   Follow failed ✗")
+                time.sleep(random.uniform(mood["gap_min"], mood["gap_max"]))
 
-            time.sleep(random.uniform(3, 7))
+            # Low-chance opportunistic like while scrolling
+            if random.random() < mood["like_chance"]:
+                _like_visible_posts(bot, 1)
 
         except Exception as e:
             err = str(e)
-            if "invalid session id" in err or "not connected to DevTools" in err or "disconnected" in err:
-                log.error(f"[{bot.username}] Browser session lost — aborting warmup")
-                _log_plan_summary(bot, plan)
+            if "invalid session id" in err or "not connected to DevTools" in err:
                 raise
-            plan["follows"]["failed"] += 1
-            log.warning(f"[{bot.username}]   Error on {url}: {e}")
+            time.sleep(3)
 
-    _log_phase_result(bot, "follows", plan["follows"])
+    # Fire any remaining batches that didn't hit their checkpoint (shouldn't happen, but safety net)
+    while batch_index < len(batches):
+        batch = batches[batch_index]
+        batch_index += 1
+        log.info(f"[{bot.username}] ── Late follow batch {batch_index}/{len(batches)}: {len(batch)} profile(s)")
+        for url in batch:
+            try:
+                bot.go(url)
+                time.sleep(random.uniform(2, 4))
+                n = _like_visible_posts(bot, likes_per_visit)
+                plan["likes"]["done"] += n
+                if _click_follow(bot):
+                    plan["follows"]["done"] += 1
+                else:
+                    plan["follows"]["failed"] += 1
+                time.sleep(random.uniform(3, 7))
+            except Exception as e:
+                plan["follows"]["failed"] += 1
+                log.warning(f"[{bot.username}]   Error on {url}: {e}")
 
-    # ── Phase 2: Extended mood-based feed browsing for remaining time ────────
-    log.info(f"[{bot.username}] ── Phase 2: browsing feed for ~{browse_minutes} min")
-    end_time = time.time() + browse_minutes * 60
-    _browse_feed(bot, end_time)
-    log.info(f"[{bot.username}]   Feed browse complete ✓")
-
-    # ── Summary ─────────────────────────────────────────────────────────────
     _log_plan_summary(bot, plan)
-    log.info(f"[{bot.username}] Warmup complete")
+    log.info(f"[{bot.username}] Warmup complete ✓")
+
+
+# ---------------------------------------------------------------------------
+# Batch splitting
+# ---------------------------------------------------------------------------
+
+def _split_batches(targets: list, min_size=1, max_size=3) -> list:
+    """Split a flat list into sub-lists of random size [min_size, max_size]."""
+    batches = []
+    i = 0
+    while i < len(targets):
+        size = random.randint(min_size, min(max_size, len(targets) - i))
+        batches.append(targets[i:i + size])
+        i += size
+    return batches
 
 
 # ---------------------------------------------------------------------------
@@ -137,51 +236,10 @@ def _new_mood():
 
 
 # ---------------------------------------------------------------------------
-# Feed browsing
-# ---------------------------------------------------------------------------
-
-def _browse_feed(bot, end_time, mood=None):
-    bot.go_home()
-    if mood is None:
-        mood = _new_mood()
-    mood_ticks = 0
-    mood_shift_at = random.randint(4, 8)
-
-    while time.time() < end_time:
-        try:
-            # Shift mood every few ticks
-            mood_ticks += 1
-            if mood_ticks >= mood_shift_at:
-                mood = _new_mood()
-                mood_ticks = 0
-                mood_shift_at = random.randint(4, 8)
-                bot.log.info(f"[{bot.username}]   Mood → {mood['name']}")
-
-            scroll_px = random.randint(mood["scroll_min"], mood["scroll_max"])
-            bot.driver.execute_script(f"window.scrollBy(0, {scroll_px});")
-
-            if random.random() < mood["read_chance"]:
-                time.sleep(random.uniform(mood["read_min"], mood["read_max"]))
-            else:
-                time.sleep(random.uniform(mood["gap_min"], mood["gap_max"]))
-
-            # Low-chance like while browsing (main likes done in phase 1)
-            if random.random() < mood["like_chance"]:
-                _like_visible_posts(bot, 1)
-
-        except Exception as e:
-            err = str(e)
-            if "invalid session id" in err or "not connected to DevTools" in err:
-                raise
-            time.sleep(3)
-
-
-# ---------------------------------------------------------------------------
 # Like posts (top-level only, no comment likes)
 # ---------------------------------------------------------------------------
 
 def _like_visible_posts(bot, count):
-    """Like up to `count` top-level posts only — skips comment likes."""
     liked = 0
     try:
         btns = bot.driver.execute_script("""
@@ -238,7 +296,6 @@ def _click_follow(bot) -> bool:
             return True
         except Exception:
             continue
-    # JS fallback — find any visible button whose text is exactly "Follow"
     try:
         result = bot.driver.execute_script("""
             const btns = document.querySelectorAll('[role="button"], button');
@@ -266,8 +323,7 @@ def _log_phase_result(bot, phase_name, result):
     failed  = result["failed"]
     status  = "✓" if failed == 0 else ("~" if done > 0 else "✗")
     bot.log.info(
-        f"[{bot.username}] Phase '{phase_name}': "
-        f"{done}/{planned} done, {failed} failed {status}"
+        f"[{bot.username}] '{phase_name}': {done}/{planned} done, {failed} failed {status}"
     )
 
 
