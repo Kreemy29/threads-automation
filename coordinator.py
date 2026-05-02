@@ -87,7 +87,13 @@ class Coordinator:
             p.start()
             self.active[username] = p
             db.update_account(username, state="running")
-            time.sleep(2)  # stagger starts slightly
+            # Stagger starts, but honor a stop request mid-spawn so Stop in
+            # the GUI doesn't have to wait N×2s for the whole batch to launch.
+            if self._stop is not None:
+                if self._stop.wait(2):
+                    return
+            else:
+                time.sleep(2)
 
     MAX_RETRIES = 5
 
