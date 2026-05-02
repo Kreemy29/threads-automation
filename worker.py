@@ -53,6 +53,7 @@ def _make_logger(username):
 
         ch = logging.StreamHandler(sys.stdout)
         ch.setFormatter(logging.Formatter(f"[{username}] %(asctime)s %(message)s", datefmt="%H:%M:%S"))
+        ch.stream = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1, closefd=False)
         logger.addHandler(ch)
 
     return logger
@@ -97,7 +98,8 @@ def run_account(username, adspower_id, state=None):
         # Treat error as pending — retry from the top
         if state == "error":
             log.info("Account was in error state — resetting to pending for retry")
-            db.update_account(username, state="pending", notes="", retry_count=0)
+            db.update_account(username, state="pending", notes="", retry_count=0,
+                              warmup_done=0, setup_done=0, warmup_start=None)
             state = "pending"
 
         log.info(f"Account state: {state}")
@@ -119,24 +121,18 @@ def run_account(username, adspower_id, state=None):
         # ── WARMUP ───────────────────────────────────────────────────
         if state == "warmup":
             account = db.get_account(username)
-            warmup_start = account.get("warmup_start")
-            if warmup_start:
-                elapsed = (datetime.utcnow() - datetime.fromisoformat(warmup_start)).total_seconds()
-                remaining = max(0, WARMUP_DURATION - elapsed)
-            else:
-                remaining = WARMUP_DURATION
-                db.update_account(username, warmup_start=datetime.utcnow().isoformat())
-
-            # Load the account's assigned follow list
             follow_list_name = account.get("follow_list", "")
             follow_list = db.get_follow_list(follow_list_name) if follow_list_name else []
 
-            if remaining > 0:
-                log.info(f"Warmup — {remaining/60:.0f} min remaining, "
-                         f"follow list: '{follow_list_name}' ({len(follow_list)} handles)")
+            if not account.get("warmup_done"):
+                # Always reset warmup_start so the full duration runs from now.
+                # (A stale warmup_start from a previous crash would cause elapsed >>
+                # WARMUP_DURATION, making remaining=0 and silently skipping warmup.)
+                db.update_account(username, warmup_start=datetime.utcnow().isoformat())
+                log.info(f"Warmup starting — follow list: '{follow_list_name}' ({len(follow_list)} handles)")
                 run_warmup(bot, follow_list=follow_list or None)
             else:
-                log.info("Warmup already completed")
+                log.info("Warmup already done for this account — skipping")
 
             db.update_account(username, warmup_done=1, state="active")
             db.log_action(username, "warmup", "ok")
@@ -191,46 +187,56 @@ def _run_active_loop(bot, username, log, media_folder: str = ""):
         db.log_action(username, "mother_repost", status)
         time.sleep(random.uniform(30, 60))
 
-    next_post_time       = datetime.utcnow()
+    next_cycle_time      = datetime.utcnow()
     next_follow_time     = datetime.utcnow() + timedelta(minutes=random.randint(20, 40))
     next_unfollow_check  = datetime.utcnow() + timedelta(minutes=10)
     next_comment_time    = _random_comment_time()
     cycle_num            = 0
+
+    # Post queue: individual tasks fired with gaps instead of all at once
+    # Each item: ("text"|"image", task_label)
+    post_queue: list = []
+    next_queued_post_time = datetime.utcnow()
 
     log.info("Entering 24-hour active SOP loop")
 
     while True:
         now = datetime.utcnow()
 
-        # ── Posting cycle ──────────────────────────────────────────
-        if now >= next_post_time:
+        # ── Refill post queue when cycle window opens ──────────────
+        if now >= next_cycle_time and not post_queue:
             cycle_num += 1
             plan = _build_cycle_plan(cycle_num)
             _log_cycle_plan(log, username, plan)
 
-            # Text posts — with mood-based browsing between each
-            text_results = []
-            for i in range(plan["text_posts"]):
-                log.info(f"[{username}] Posting text post {i+1}/{plan['text_posts']}…")
-                ok = _post_one_text(bot, media_folder)
-                text_results.append(ok)
-                _log_step(log, username, f"text post {i+1}", ok)
-                if i < plan["text_posts"] - 1:
-                    _active_browse(bot, username, log, seconds=random.randint(15, 30))
-
-            # Image post
-            log.info(f"[{username}] Posting image post…")
-            img_ok = _post_one_image(bot, media_folder)
-            _log_step(log, username, "image post", img_ok)
-
-            ok_count = sum(text_results) + img_ok
-            total    = len(text_results) + 1
-            db.log_action(username, "posting_cycle", "ok" if ok_count == total else "partial",
-                          f"{ok_count}/{total} posted")
+            tasks = [("text", i + 1) for i in range(plan["text_posts"])]
+            tasks.append(("image", plan["text_posts"] + 1))
+            random.shuffle(tasks)  # unpredictable ordering each cycle
+            post_queue = tasks
+            next_queued_post_time = now  # start firing immediately
 
             interval = random.randint(POST_CYCLE_MIN, POST_CYCLE_MAX)
-            next_post_time = now + timedelta(seconds=interval)
-            log.info(f"[{username}] Cycle {cycle_num} done: {ok_count}/{total} ✓ — next in {interval//60} min")
+            next_cycle_time = now + timedelta(seconds=interval)
+            log.info(f"[{username}] Cycle {cycle_num}: {len(post_queue)} tasks queued — next cycle in {interval//60}m")
+
+        # ── Fire one queued post ───────────────────────────────────
+        if post_queue and now >= next_queued_post_time:
+            task_type, task_num = post_queue.pop(0)
+
+            if task_type == "text":
+                log.info(f"[{username}] Queued post {task_num} (text)…")
+                ok = _post_one_text(bot, media_folder)
+                _log_step(log, username, f"text post {task_num}", ok)
+            else:
+                log.info(f"[{username}] Queued post {task_num} (image)…")
+                ok = _post_one_image(bot, media_folder)
+                _log_step(log, username, "image post", ok)
+
+            if post_queue:
+                # Space remaining posts 5–25 minutes apart
+                gap = random.randint(5, 25) * 60
+                next_queued_post_time = datetime.utcnow() + timedelta(seconds=gap)
+                log.info(f"[{username}] {len(post_queue)} post(s) remaining — next in {gap//60}m")
 
         # ── Outreach comments ──────────────────────────────────────
         if now >= next_comment_time:
@@ -241,12 +247,15 @@ def _run_active_loop(bot, username, log, media_folder: str = ""):
             _log_step(log, username, f"outreach comments ({done}/{planned})", done > 0)
             next_comment_time = _random_comment_time()
 
-        # ── Follow batch ───────────────────────────────────────────
+        # ── Follow mini-batch (1-3 at a time, not the whole batch) ─
         if now >= next_follow_time and tier1_users:
-            log.info(f"[{username}] Follow plan: up to {FOLLOW_BATCH_SIZE} tier-1 users")
-            run_follow_batch(bot, tier1_users)
-            next_follow_time = now + timedelta(minutes=random.randint(45, 90))
-            log.info(f"[{username}] Next follow batch in ~{(next_follow_time - now).seconds // 60} min")
+            mini_size = random.randint(1, min(3, len(tier1_users)))
+            mini_batch = random.sample(tier1_users, mini_size)
+            log.info(f"[{username}] Mini-follow: {mini_size} tier-1 user(s)")
+            run_follow_batch(bot, mini_batch)
+            gap = random.randint(20, 50)
+            next_follow_time = now + timedelta(minutes=gap)
+            log.info(f"[{username}] Next follow check in {gap}m")
 
         # ── Unfollow check ─────────────────────────────────────────
         if now >= next_unfollow_check:
@@ -268,7 +277,7 @@ def _build_cycle_plan(cycle_num):
 def _log_cycle_plan(log, username, plan):
     log.info(
         f"[{username}] ── Cycle {plan['cycle']} plan: "
-        f"{plan['text_posts']} text posts + {plan['image_post']} image post"
+        f"{plan['text_posts']} text + {plan['image_post']} image (shuffled, spaced 5–25m apart)"
     )
 
 

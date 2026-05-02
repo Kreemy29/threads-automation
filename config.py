@@ -60,6 +60,8 @@ if os.path.exists(_active):
         WARMUP_MAX_FOLLOWS     = _s.get("warmup_max_follows", WARMUP_MAX_FOLLOWS)
         POST_CYCLE_MIN         = _s.get("cycle_min", POST_CYCLE_MIN // 60) * 60
         POST_CYCLE_MAX         = _s.get("cycle_max", POST_CYCLE_MAX // 60) * 60
+        if POST_CYCLE_MIN > POST_CYCLE_MAX:
+            POST_CYCLE_MIN, POST_CYCLE_MAX = POST_CYCLE_MAX, POST_CYCLE_MIN
         OUTREACH_COMMENTS_MIN  = _s.get("comments_min", OUTREACH_COMMENTS_MIN)
         OUTREACH_COMMENTS_MAX  = _s.get("comments_max", OUTREACH_COMMENTS_MAX)
         FOLLOW_BATCH_SIZE      = _s.get("follow_batch", FOLLOW_BATCH_SIZE)

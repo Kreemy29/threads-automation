@@ -47,10 +47,13 @@ def filter_american_names(names, api_key: str) -> list:
     names_list = "\n".join(f"- {n}" for n in names)
     prompt = (
         "You are given a list of social media display names or usernames. "
-        "Return ONLY the ones that are very likely to belong to an American (US) person "
-        "based on the name itself — common US first names, American-style usernames, English names, etc. "
-        "Ignore names that are clearly non-American (Arabic, Spanish, Asian, etc.). "
-        "If unsure, exclude it. Reply with just the matching names, one per line, no extras.\n\n"
+        "Return ONLY the ones that are very likely to belong to an American (US) MALE person — "
+        "common US male first names (like Jake, Tyler, Marcus, Ryan, etc.), "
+        "male-coded American usernames, or clearly male English names. "
+        "Exclude: female names, gender-neutral names you're unsure about, "
+        "non-American names (Arabic, Spanish, Asian, etc.), brand/company names. "
+        "If unsure whether it's male or American, exclude it. "
+        "Reply with just the matching names, one per line, no extras.\n\n"
         f"{names_list}"
     )
 
@@ -232,13 +235,17 @@ def _generate_ai_comment(api_key: str, context: str):
         return None
 
     prompt = (
-        "You are a real LA girl leaving a comment on someone's Threads post. "
-        "You talk like someone from Los Angeles — use natural US/LA slang: "
-        "lowkey, slay, no cap, periodt, it's giving, rent free, understood the assignment, fr fr, bestie, etc. "
-        "Mix in 1-3 emojis naturally (not all at the end). Keep it short — 1 sentence, 2 max. "
-        "Sound like a real person hyping someone up or reacting authentically — "
-        "reference something specific from the post, don't be generic. "
-        "No hashtags. No quotes around your output. ONLY output the comment.\n\n"
+        "You are a real 22-year-old LA girl leaving a comment on someone's Threads post. "
+        "You mix LA slang and Gen Z vocab naturally — don't force it, pick what fits. "
+        "Word bank to draw from: lowkey, highkey, no cap, periodt, fr fr, bestie, slay, ate, "
+        "it's giving, rent free, understood the assignment, main character, delulu, rizz, iykyk, "
+        "era, snatched, bussin, hits different, bet, real ones know, sending me, not me ___, "
+        "the way ___, okay but actually, ngl, W, unhinged, 💅 ✨ 🔥 😭 💀 🫶 😩 🌸 👀 🤌 😍 💫. "
+        "Rules: 1 sentence max (2 only if it flows naturally). "
+        "Use 1-2 emojis placed naturally in the text, not just stacked at the end. "
+        "React to something SPECIFIC from the post — don't be generic. "
+        "Sound like you're genuinely hyping them or reacting, not copy-pasting. "
+        "No hashtags. No quotes. Output ONLY the comment text.\n\n"
         f"{context}\n\n"
         "Your comment:"
     )
@@ -479,42 +486,50 @@ def _post_comment_on(bot, post_url: str, api_key: str, fallback_comments: list) 
 
 
 def _click_comment_post_button(bot, textbox) -> bool:
-    """Multi-strategy Post button click for comment dialogs."""
+    """Click the Post button in the comment reply dialog.
 
-    # Wait up to 5s for a non-disabled Post/Reply button to appear
-    try:
-        btn = WebDriverWait(bot.driver, 5).until(lambda d: _find_enabled_submit_btn(d))
-        btn.click()
-        time.sleep(3)
-        bot.log.info(f"[{bot.username}] Comment submitted")
-        return True
-    except Exception:
-        pass
-
-    # JS fallback — also checks aria-label for icon-only buttons
+    Threads renders it as a plain <div> with text 'Post' — same as the compose dialog.
+    Walk up from the textbox and match any element by innerText.
+    """
     try:
         result = bot.driver.execute_script("""
-            const labels = ['post','reply','share','send','comment'];
-            const els = document.querySelectorAll('div[role="button"], button');
-            for (const el of els) {
-                const t = (el.textContent || '').trim().toLowerCase();
-                const label = (el.getAttribute('aria-label') || '').toLowerCase();
+            const textbox = document.querySelector('[role="textbox"]');
+            if (!textbox) return 'no-textbox';
+
+            // Same closest-to-textbox strategy as compose Post button
+            const candidates = [];
+            for (const el of document.querySelectorAll('*')) {
+                if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
+                const txt = (el.innerText || '').trim();
+                if (txt !== 'Post') continue;
                 const disabled = el.getAttribute('aria-disabled') === 'true'
-                               || el.disabled
-                               || el.classList.contains('disabled');
-                if (!disabled && el.offsetWidth > 0 &&
-                    (labels.includes(t) || labels.some(l => label.includes(l)))) {
-                    el.click(); return true;
-                }
+                              || el.getAttribute('disabled') != null;
+                if (disabled) continue;
+                const childHasPost = Array.from(el.children).some(
+                    c => (c.innerText || '').trim() === 'Post'
+                );
+                if (childHasPost) continue;
+                candidates.push(el);
             }
-            return false;
+            if (candidates.length === 0) return 'not-found';
+
+            let bestBtn = null, bestDist = Infinity;
+            for (const btn of candidates) {
+                let el = btn, dist = 0;
+                while (el && !el.contains(textbox)) { el = el.parentElement; dist++; }
+                if (dist < bestDist) { bestDist = dist; bestBtn = btn; }
+            }
+
+            if (bestBtn) { bestBtn.click(); return 'clicked'; }
+            return 'not-found';
         """)
-        if result:
+        if result == 'clicked':
             time.sleep(3)
-            bot.log.info(f"[{bot.username}] Comment submitted via JS")
+            bot.log.info(f"[{bot.username}] Comment submitted")
             return True
-    except Exception:
-        pass
+        bot.log.warning(f"[{bot.username}] Comment post button: {result}")
+    except Exception as e:
+        bot.log.warning(f"[{bot.username}] Comment post button error: {e}")
 
     # Enter key last resort
     try:
@@ -525,54 +540,8 @@ def _click_comment_post_button(bot, textbox) -> bool:
     except Exception:
         pass
 
-    bot.log.warning(f"[{bot.username}] Could not find submit button for comment")
+    bot.log.warning(f"[{bot.username}] Could not find Post button for comment")
     return False
-
-
-def _find_enabled_submit_btn(driver):
-    labels = ["post", "reply", "share", "send", "comment"]
-    els = driver.find_elements(By.XPATH, '//*[@role="button" or self::button]')
-    for el in els:
-        try:
-            if not el.is_displayed():
-                continue
-            text = (el.text or "").strip().lower()
-            aria = (el.get_attribute("aria-label") or "").lower()
-            disabled = (el.get_attribute("aria-disabled") == "true"
-                        or el.get_attribute("disabled") is not None)
-            if disabled:
-                continue
-            if any(l == text or l in aria for l in labels):
-                return el
-        except Exception:
-            continue
-
-    # Fallback: find any non-disabled button near a textbox (Threads uses icon-only send buttons)
-    try:
-        result = driver.execute_script("""
-            const textbox = document.querySelector('[role="textbox"]');
-            if (!textbox) return null;
-            // Walk up to find a form-like container, then look for any enabled button
-            let container = textbox;
-            for (let i = 0; i < 8; i++) {
-                container = container.parentElement;
-                if (!container) break;
-                const btns = container.querySelectorAll('[role="button"], button');
-                for (const b of btns) {
-                    const disabled = b.getAttribute('aria-disabled') === 'true' || b.disabled;
-                    const visible = b.offsetWidth > 0 && b.offsetHeight > 0;
-                    // Skip if it looks like a cancel/close button
-                    const txt = (b.textContent || '').trim().toLowerCase();
-                    if (!disabled && visible && txt !== 'cancel' && txt !== 'close') {
-                        return b;
-                    }
-                }
-            }
-            return null;
-        """)
-        return result
-    except Exception:
-        return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────

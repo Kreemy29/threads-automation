@@ -21,6 +21,7 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5
 _PLACEHOLDER_MARKERS = (
     "add your", "replace with", "delete this", "make sure you have",
     "each post will", "one per line", "posting cycles",
+    "one caption will", "picked randomly for",
 )
 
 def _load_lines(filename):
@@ -76,15 +77,20 @@ def _generate_post(api_key: str, example: str):
     if not api_key:
         return None
     prompt = (
-        "You write short Threads captions for a flirty, confident LA girl account. "
-        "You talk like someone from Los Angeles — use natural US/LA slang: "
-        "lowkey, slay, no cap, periodt, it's giving, rent free, understood the assignment, fr fr, bestie, ate, etc. "
-        "Mix in 1-3 emojis naturally throughout (not just at the end). "
+        "You write short Threads posts for a flirty, confident LA girl account. "
+        "You sound like a real 22-year-old from Los Angeles who naturally mixes LA slang and Gen Z vocab. "
+        "Draw from this word bank (don't use all of them — pick what fits naturally): "
+        "lowkey, highkey, no cap, periodt, fr fr, bestie, slay, ate, it's giving, rent free, "
+        "understood the assignment, main character, delulu, rizz, iykyk, era (as in 'I'm in my ___ era'), "
+        "snatched, bussin, hits different, bet, based, real ones know, sending me, on sight, "
+        "manifesting, not me ___, the way ___, okay but actually, ngl, npc energy, W, unhinged. "
+        "Use 1-3 emojis naturally placed in the text — not just piled at the end. "
+        "Good emoji choices: 💅 ✨ 🔥 😭 💀 🫶 😩 🌸 👀 🤌 💁‍♀️ 🫡 🙏 😍 💫 🌴 "
         "Here is one example of the style and vibe:\n\n"
         f'"{example}"\n\n'
-        "Write ONE new caption in the exact same energy — same length (1-3 sentences max), same confidence. "
-        "Do NOT copy the example. Make it feel fresh and original. "
-        "No hashtags. No quotes around the output. Output ONLY the caption text."
+        "Write ONE new post in the exact same energy — 1-3 sentences max, same confidence. "
+        "Do NOT copy the example. Make it feel fresh, specific, and real. "
+        "No hashtags. No quotes around the output. Output ONLY the post text."
     )
     try:
         resp = requests.post(
@@ -127,7 +133,16 @@ def post_text(bot, text=None):
             time.sleep(2)
             continue
 
-        time.sleep(1)
+        # Fire React synthetic events so the Post button becomes enabled
+        try:
+            bot.driver.execute_script("""
+                arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText'}));
+                arguments[0].dispatchEvent(new Event('change', {bubbles:true}));
+            """, textbox)
+        except Exception:
+            pass
+
+        time.sleep(2)  # wait for React to enable the Post button
         if bot.click_post_button():
             log.info(f"[{bot.username}] Text post published")
             return True
@@ -185,7 +200,15 @@ def post_image(bot, image_path=None, caption=None, media_folder: str = ""):
         if not bot.paste_text(textbox, caption):
             log.warning(f"[{bot.username}] Caption paste failed (attempt {attempt+1})")
 
-        time.sleep(1)
+        try:
+            bot.driver.execute_script("""
+                arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText'}));
+                arguments[0].dispatchEvent(new Event('change', {bubbles:true}));
+            """, textbox)
+        except Exception:
+            pass
+
+        time.sleep(2)
         if bot.click_post_button():
             log.info(f"[{bot.username}] Image post published")
             return True
