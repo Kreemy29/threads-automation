@@ -216,13 +216,6 @@ _MOODS = [
         "gap_min": 2.0,  "gap_max": 6.0,
     },
     {
-        "name": "fast",
-        "scroll_min": 500, "scroll_max": 1000,
-        "read_chance": 0.08, "read_min": 1, "read_max": 3,
-        "like_chance": 0.04,
-        "gap_min": 0.3,  "gap_max": 1.5,
-    },
-    {
         "name": "distracted",
         "scroll_min": 300, "scroll_max": 700,
         "read_chance": 0.15, "read_min": 8, "read_max": 25,
@@ -282,6 +275,9 @@ def _like_visible_posts(bot, count):
 # ---------------------------------------------------------------------------
 
 def _click_follow(bot) -> bool:
+    # Close any hover preview cards or modals so we don't click their Follow
+    bot.dismiss_overlays()
+
     for xpath in [
         '//*[@role="button" and normalize-space(.)="Follow"]',
         '//button[normalize-space()="Follow"]',
@@ -297,11 +293,30 @@ def _click_follow(bot) -> bool:
         except Exception:
             continue
     try:
+        # JS fallback that skips buttons inside floating preview cards / dialogs
         result = bot.driver.execute_script("""
+            function inOverlay(el) {
+                let n = el;
+                while (n && n !== document.body) {
+                    const role = n.getAttribute && n.getAttribute('role');
+                    if (role === 'dialog' || role === 'tooltip') return true;
+                    const cs = window.getComputedStyle(n);
+                    if (cs && (cs.position === 'fixed' || cs.position === 'absolute')) {
+                        // Heuristic: floating element with high z-index = overlay
+                        const z = parseInt(cs.zIndex || '0', 10);
+                        if (z >= 100) return true;
+                    }
+                    n = n.parentElement;
+                }
+                return false;
+            }
             const btns = document.querySelectorAll('[role="button"], button');
             for (const b of btns) {
                 const txt = (b.innerText || b.textContent || '').trim();
-                if (txt === 'Follow' && b.offsetWidth > 0) { b.click(); return true; }
+                if (txt !== 'Follow' || b.offsetWidth === 0) continue;
+                if (inOverlay(b)) continue;
+                b.click();
+                return true;
             }
             return false;
         """)

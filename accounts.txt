@@ -1,2 +1,2 @@
 # username,adspower_id,media_folder,follow_list
-aria5,k1bj1lit,D:/work/automaton/new agency/aria/aria new batch,
+aria5,k1bj1lit,D:/work/automaton/new agency/aria/Ayin/reel/new ayin,List1

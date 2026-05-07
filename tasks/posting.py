@@ -221,6 +221,60 @@ def post_image(bot, image_path=None, caption=None, media_folder: str = ""):
 
 
 # ------------------------------------------------------------------
+# Ghost post (image with no caption)
+# ------------------------------------------------------------------
+
+def post_ghost(bot, image_path=None, media_folder: str = ""):
+    """Post a media file with no caption. Same as image post but caption is empty."""
+    log = bot.log
+    if image_path is None:
+        image_path = _pick_image(media_folder)
+
+    log.info(f"[{bot.username}] Ghost post: {os.path.basename(image_path)}")
+
+    for attempt in range(3):
+        textbox = bot.open_compose()
+        if not textbox:
+            log.warning(f"[{bot.username}] Could not open compose for ghost (attempt {attempt+1})")
+            time.sleep(3)
+            continue
+
+        try:
+            file_input = WebDriverWait(bot.driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
+            )
+            file_input.send_keys(os.path.abspath(image_path))
+            log.info(f"[{bot.username}] Ghost image selected")
+            time.sleep(5)
+        except Exception as e:
+            log.warning(f"[{bot.username}] Ghost upload failed (attempt {attempt+1}): {e}")
+            time.sleep(3)
+            continue
+
+        # No caption — Threads enables Post once a media item is attached.
+        # Fire a synthetic input event on the (empty) textbox so React is happy.
+        try:
+            tb = bot.driver.find_element(By.XPATH, '//div[@role="textbox"]')
+            bot.driver.execute_script("""
+                arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText'}));
+                arguments[0].dispatchEvent(new Event('change', {bubbles:true}));
+            """, tb)
+        except Exception:
+            pass
+
+        time.sleep(2)
+        if bot.click_post_button():
+            log.info(f"[{bot.username}] Ghost post published")
+            return True
+
+        log.warning(f"[{bot.username}] Ghost click_post_button failed (attempt {attempt+1})")
+        time.sleep(3)
+
+    log.error(f"[{bot.username}] Ghost post failed after 3 attempts")
+    return False
+
+
+# ------------------------------------------------------------------
 # Full posting cycle (4 text + 1 image)
 # ------------------------------------------------------------------
 

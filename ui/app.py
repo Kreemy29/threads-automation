@@ -491,6 +491,13 @@ class SettingsTab(ctk.CTkFrame):
         warm_card = self._card(left, "")
         warm_card.pack(fill="x", pady=(0, 8))
 
+        self.warmup_enabled_var = ctk.BooleanVar(value=True)
+        warm_toggle_row = ctk.CTkFrame(warm_card, fg_color="transparent")
+        warm_toggle_row.pack(fill="x", padx=12, pady=4)
+        ctk.CTkLabel(warm_toggle_row, text="Run warmup before active session",
+                     text_color="#AAAAAA", font=("Segoe UI", 11)).pack(side="left")
+        ctk.CTkSwitch(warm_toggle_row, text="", variable=self.warmup_enabled_var).pack(side="right")
+
         self.warmup_duration  = IntEntry(warm_card, "Warmup duration (minutes)", "10")
         self.warmup_duration.pack(fill="x", padx=12, pady=4)
 
@@ -524,6 +531,9 @@ class SettingsTab(ctk.CTkFrame):
         ctk.CTkLabel(img_row, text="Image post per cycle", text_color="#AAAAAA",
                      font=("Segoe UI", 11)).pack(side="left")
         ctk.CTkSwitch(img_row, text="", variable=self.image_post_var).pack(side="right")
+
+        self.ghost_posts = IntEntry(post_card, "Ghost posts per cycle (media, no caption)", "0")
+        self.ghost_posts.pack(fill="x", padx=12, pady=4)
 
         likes_row_a = ctk.CTkFrame(post_card, fg_color="transparent")
         likes_row_a.pack(fill="x", padx=12, pady=4)
@@ -567,6 +577,24 @@ class SettingsTab(ctk.CTkFrame):
         self.mother_post_url  = LabeledEntry(gen_card, "Mother post URL (Threads post to repost)", "", width=300)
         self.mother_post_url.pack(fill="x", padx=12, pady=4)
 
+        # Mother repost (SOP flow) controls
+        self.mother_repost_enabled_var = ctk.BooleanVar(value=True)
+        mr_row = ctk.CTkFrame(gen_card, fg_color="transparent")
+        mr_row.pack(fill="x", padx=12, pady=4)
+        ctk.CTkLabel(mr_row, text="Mother repost enabled (Quote + image thread + pin)",
+                     text_color="#AAAAAA", font=("Segoe UI", 11)).pack(side="left")
+        ctk.CTkSwitch(mr_row, text="", variable=self.mother_repost_enabled_var).pack(side="right")
+
+        self.mother_repost_cta_file = LabeledEntry(gen_card, "Mother repost CTA file", "", width=300)
+        self.mother_repost_cta_file.pack(fill="x", padx=12, pady=4)
+        ctk.CTkButton(gen_card, text="Browse CTA file…", height=26,
+                      command=lambda: self._browse_file_into(self.mother_repost_cta_file)).pack(anchor="w", padx=12, pady=(0, 4))
+
+        self.mother_repost_images_folder = LabeledEntry(gen_card, "Mother repost images folder", "", width=300)
+        self.mother_repost_images_folder.pack(fill="x", padx=12, pady=4)
+        ctk.CTkButton(gen_card, text="Browse images folder…", height=26,
+                      command=lambda: self._browse_folder_into(self.mother_repost_images_folder)).pack(anchor="w", padx=12, pady=(0, 8))
+
         self.adspower_api_key = LabeledEntry(gen_card, "AdsPower API Key", "", width=300)
         self.adspower_api_key.pack(fill="x", padx=12, pady=4)
 
@@ -580,6 +608,16 @@ class SettingsTab(ctk.CTkFrame):
                          text_color=ACCENT).pack(anchor="w", padx=12, pady=(8, 2))
         return f
 
+    def _browse_file_into(self, entry):
+        path = filedialog.askopenfilename(filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
+        if path:
+            entry.set(path)
+
+    def _browse_folder_into(self, entry):
+        path = filedialog.askdirectory()
+        if path:
+            entry.set(path)
+
     # ── preset I/O ──────────────────────────────────────────────────────────
 
     def _to_dict(self) -> dict:
@@ -589,6 +627,7 @@ class SettingsTab(ctk.CTkFrame):
             "image_post":           self.image_post_var.get(),
             "active_likes_min":     self.active_likes_min.get(),
             "active_likes_max":     self.active_likes_max.get(),
+            "warmup_enabled":       self.warmup_enabled_var.get(),
             "warmup_duration":      self.warmup_duration.get(),
             "warmup_targets":       self.warmup_targets.get(),
             "warmup_likes_min":     self.warmup_likes_min.get(),
@@ -602,6 +641,10 @@ class SettingsTab(ctk.CTkFrame):
             "outreach_targets":     self.outreach_targets.get(),
             "batch_size":           self.batch_size.get(),
             "mother_post_url":      self.mother_post_url.get(),
+            "mother_repost_enabled":       self.mother_repost_enabled_var.get(),
+            "mother_repost_cta_file":      self.mother_repost_cta_file.get(),
+            "mother_repost_images_folder": self.mother_repost_images_folder.get(),
+            "ghost_posts_per_cycle":       self.ghost_posts.get(),
             "adspower_api_key":     self.adspower_api_key.get(),
             "gemini_key":           self.gemini_key.get(),
         }
@@ -612,6 +655,7 @@ class SettingsTab(ctk.CTkFrame):
         self.image_post_var.set(d.get("image_post", True))
         self.active_likes_min.set(d.get("active_likes_min", 1))
         self.active_likes_max.set(d.get("active_likes_max", 5))
+        self.warmup_enabled_var.set(d.get("warmup_enabled", True))
         self.warmup_duration.set(d.get("warmup_duration", 60))
         self.warmup_targets.set(d.get("warmup_targets", ""))
         self.warmup_likes_min.set(d.get("warmup_likes_min", 2))
@@ -625,6 +669,10 @@ class SettingsTab(ctk.CTkFrame):
         self.outreach_targets.set(d.get("outreach_targets", ""))
         self.batch_size.set(d.get("batch_size", 15))
         self.mother_post_url.set(d.get("mother_post_url", ""))
+        self.mother_repost_enabled_var.set(d.get("mother_repost_enabled", True))
+        self.mother_repost_cta_file.set(d.get("mother_repost_cta_file", ""))
+        self.mother_repost_images_folder.set(d.get("mother_repost_images_folder", ""))
+        self.ghost_posts.set(d.get("ghost_posts_per_cycle", 0))
         self.adspower_api_key.set(d.get("adspower_api_key", ""))
         self.gemini_key.set(d.get("gemini_key", d.get("deepseek_key", "")))
 
@@ -996,6 +1044,7 @@ class App(ctk.CTk):
         config.PIC_COMMENT_RATIO       = s.get("pic_comment_ratio", 20)
         config.FOLLOW_BATCH_SIZE       = s["follow_batch"]
         config.UNFOLLOW_AFTER_SECONDS  = s["unfollow_hours"] * 3600
+        config.WARMUP_ENABLED          = s.get("warmup_enabled", True)
         config.WARMUP_DURATION         = s["warmup_duration"] * 60
         config.WARMUP_LIKES_MIN        = s.get("warmup_likes_min", 2)
         config.WARMUP_LIKES_MAX        = s.get("warmup_likes_max", 6)
@@ -1004,6 +1053,10 @@ class App(ctk.CTk):
         config.ACTIVE_LIKES_MAX        = s.get("active_likes_max", 5)
         config.TEXT_POSTS_PER_CYCLE    = s.get("text_posts", 4)
         config.MOTHER_POST_URL         = s["mother_post_url"]
+        config.MOTHER_REPOST_ENABLED       = s.get("mother_repost_enabled", True)
+        config.MOTHER_REPOST_CTA_FILE      = s.get("mother_repost_cta_file", "")
+        config.MOTHER_REPOST_IMAGES_FOLDER = s.get("mother_repost_images_folder", "")
+        config.GHOST_POSTS_PER_CYCLE       = s.get("ghost_posts_per_cycle", 0)
         config.BATCH_SIZE              = s["batch_size"]
         config.ADSPOWER_API_KEY        = s.get("adspower_api_key", "")
         config.GEMINI_API_KEY          = s.get("gemini_key", "")

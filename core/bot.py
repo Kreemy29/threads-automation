@@ -116,6 +116,33 @@ class ThreadsBot:
     def go_home(self):
         self.go(self.BASE_URL)
 
+    def dismiss_overlays(self):
+        """Close any open hover/preview cards or modals.
+
+        Threads shows a small floating card when the cursor hovers over a
+        username. If the bot's previous click landed near such a username
+        (e.g. while liking a post), the card may stay open and intercept the
+        next interaction — including matching a stray 'Follow' button inside
+        the card. Pressing Escape and clicking on a neutral spot dismisses it.
+        """
+        try:
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+            time.sleep(0.2)
+        except Exception:
+            pass
+        try:
+            self.driver.execute_script("""
+                // Click on body at a known-empty spot near the top to drop
+                // focus from any popup, without triggering link navigation.
+                const evt = new MouseEvent('click', {
+                    bubbles: true, cancelable: true, view: window,
+                    clientX: 5, clientY: 5
+                });
+                document.body.dispatchEvent(evt);
+            """)
+        except Exception:
+            pass
+
     def is_logged_in(self):
         try:
             url = self.driver.current_url.lower()

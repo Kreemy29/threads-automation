@@ -244,7 +244,11 @@ def _generate_ai_comment(api_key: str, context: str):
         "Rules: 1 sentence max (2 only if it flows naturally). "
         "Use 1-2 emojis placed naturally in the text, not just stacked at the end. "
         "React to something SPECIFIC from the post — don't be generic. "
-        "Sound like you're genuinely hyping them or reacting, not copy-pasting. "
+        "Read the existing comments below: match the energy of the conversation but "
+        "DO NOT repeat their phrasing, jokes, or angles. Say something fresh that "
+        "adds to the vibe instead of echoing what's already been said. If everyone "
+        "is hyping, hype differently. If they're roasting, roast a different detail. "
+        "Sound like you're genuinely reacting in the moment, not copy-pasting. "
         "No hashtags. No quotes. Output ONLY the comment text.\n\n"
         f"{context}\n\n"
         "Your comment:"
@@ -570,6 +574,9 @@ def run_follow_batch(bot, tier1_users: list):
 
 
 def _click_follow_button(bot) -> bool:
+    # Close any hover preview cards or dialogs so we don't follow the wrong user
+    bot.dismiss_overlays()
+
     for xpath in [
         '//*[@role="button" and normalize-space(.)="Follow"]',
         '//button[normalize-space()="Follow"]',
@@ -582,13 +589,30 @@ def _click_follow_button(bot) -> bool:
             return True
         except Exception:
             continue
-    # JS fallback
+    # JS fallback that skips buttons inside floating preview cards / dialogs
     try:
         result = bot.driver.execute_script("""
+            function inOverlay(el) {
+                let n = el;
+                while (n && n !== document.body) {
+                    const role = n.getAttribute && n.getAttribute('role');
+                    if (role === 'dialog' || role === 'tooltip') return true;
+                    const cs = window.getComputedStyle(n);
+                    if (cs && (cs.position === 'fixed' || cs.position === 'absolute')) {
+                        const z = parseInt(cs.zIndex || '0', 10);
+                        if (z >= 100) return true;
+                    }
+                    n = n.parentElement;
+                }
+                return false;
+            }
             const btns = document.querySelectorAll('[role="button"], button');
             for (const b of btns) {
                 const txt = (b.innerText || b.textContent || '').trim();
-                if (txt === 'Follow' && b.offsetWidth > 0) { b.click(); return true; }
+                if (txt !== 'Follow' || b.offsetWidth === 0) continue;
+                if (inOverlay(b)) continue;
+                b.click();
+                return true;
             }
             return false;
         """)

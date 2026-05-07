@@ -10,9 +10,15 @@ DEEPSEEK_API_KEY  = os.getenv("DEEPSEEK_API_KEY", "")
 GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
 
 MOTHER_POST_URL = os.getenv("MOTHER_POST_URL", "")
+MOTHER_REPOST_ENABLED = True
+MOTHER_REPOST_CTA_FILE = ""
+MOTHER_REPOST_IMAGES_FOLDER = ""
+
+GHOST_POSTS_PER_CYCLE = 0
 
 BATCH_SIZE = 15
 
+WARMUP_ENABLED      = True
 WARMUP_DURATION     = 3600
 WARMUP_LIKES_MIN    = 2
 WARMUP_LIKES_MAX    = 6
@@ -55,6 +61,7 @@ if os.path.exists(_active):
     try:
         with open(_active, "r", encoding="utf-8") as _f:
             _s = json.load(_f)
+        WARMUP_ENABLED         = _s.get("warmup_enabled", WARMUP_ENABLED)
         WARMUP_DURATION        = _s.get("warmup_duration", WARMUP_DURATION // 60) * 60
         WARMUP_LIKES_MIN       = _s.get("warmup_likes_min", WARMUP_LIKES_MIN)
         WARMUP_LIKES_MAX       = _s.get("warmup_likes_max", WARMUP_LIKES_MAX)
@@ -73,6 +80,10 @@ if os.path.exists(_active):
         SESSION_DURATION       = _s.get("session_duration", SESSION_DURATION // 60) * 60
         PIC_COMMENT_RATIO      = _s.get("pic_comment_ratio", PIC_COMMENT_RATIO)
         MOTHER_POST_URL        = _s.get("mother_post_url", MOTHER_POST_URL)
+        MOTHER_REPOST_ENABLED       = _s.get("mother_repost_enabled", MOTHER_REPOST_ENABLED)
+        MOTHER_REPOST_CTA_FILE      = _s.get("mother_repost_cta_file", MOTHER_REPOST_CTA_FILE)
+        MOTHER_REPOST_IMAGES_FOLDER = _s.get("mother_repost_images_folder", MOTHER_REPOST_IMAGES_FOLDER)
+        GHOST_POSTS_PER_CYCLE       = _s.get("ghost_posts_per_cycle", GHOST_POSTS_PER_CYCLE)
         BATCH_SIZE             = _s.get("batch_size", BATCH_SIZE)
         if _s.get("adspower_api_key"):
             ADSPOWER_API_KEY   = _s["adspower_api_key"]

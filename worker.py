@@ -25,6 +25,7 @@ from config import (
     TEXT_POSTS_PER_CYCLE,
     ACTIVE_LIKES_MIN,
     ACTIVE_LIKES_MAX,
+    WARMUP_ENABLED,
     WARMUP_DURATION,
 )
 from core.bot import ThreadsBot
@@ -126,15 +127,17 @@ def run_account(username, adspower_id, state=None):
             follow_list_name = account.get("follow_list", "")
             follow_list = db.get_follow_list(follow_list_name) if follow_list_name else []
 
-            if not account.get("warmup_done"):
+            if not WARMUP_ENABLED:
+                log.info("Warmup disabled in settings — skipping")
+            elif account.get("warmup_done"):
+                log.info("Warmup already done for this account — skipping")
+            else:
                 db.update_account(username, warmup_start=datetime.utcnow().isoformat())
                 log.info(f"Warmup starting — follow list: '{follow_list_name}' ({len(follow_list)} handles)")
                 run_warmup(bot, follow_list=follow_list or None)
-            else:
-                log.info("Warmup already done for this account — skipping")
 
             db.update_account(username, warmup_done=1, state="active")
-            db.log_action(username, "warmup", "ok")
+            db.log_action(username, "warmup", "ok" if WARMUP_ENABLED else "skipped")
             state = "active"
 
         # ── ACTIVE (time-bounded session) ────────────────────────────
@@ -173,8 +176,9 @@ def _run_active_loop(bot, username, log, media_folder: str = ""):
     tier1_users = _load_tier1_users()
     account = db.get_account(username)
 
-    # Repost/quote the mother's post once at the start
-    if not account.get("telegram_posted"):
+    # Repost/quote the mother's post once at the start (if enabled and not already done)
+    from config import MOTHER_REPOST_ENABLED
+    if MOTHER_REPOST_ENABLED and not account.get("telegram_posted"):
         ok = run_mother_repost(bot)
         db.update_account(username, telegram_posted=1 if ok else 0,
                           telegram_pinned=1 if ok else 0)
@@ -208,7 +212,7 @@ def _run_active_loop(bot, username, log, media_folder: str = ""):
             _execute_task(bot, username, log, task, media_folder)
 
             # After most tasks, return to the feed so we can scroll while waiting
-            if task["type"] in ("post_text", "post_image", "comment", "follow", "unfollow_check"):
+            if task["type"] in ("post_text", "post_image", "post_ghost", "comment", "follow", "unfollow_check"):
                 try:
                     bot.go_home()
                 except Exception:
@@ -251,69 +255,127 @@ def _run_active_loop(bot, username, log, media_folder: str = ""):
 # Task queue builder — every account gets its own randomized queue
 # ------------------------------------------------------------------
 
-# Task priorities: higher = always included first when slots are limited
-_TASK_PRIORITY = {"post_text": 3, "post_image": 3, "comment": 2,
-                  "follow": 2, "like": 2, "unfollow_check": 1, "scroll": 1}
+# Slot share per task type (must sum to ~1.0).  Used to allocate slots
+# proportionally so every cycle has a mix of action types instead of
+# being dominated by whichever type has the most candidates.
+_TASK_MIX = {
+    "post":     0.30,
+    "like":     0.25,
+    "follow":   0.18,
+    "comment":  0.12,
+    "scroll":   0.15,
+}
+
+# When trimming extras (count > 1), reduce in this order
+_TRIM_ORDER = ["scroll", "post", "like", "follow", "comment"]
 
 
 def _build_task_queue(cycle_num: int, tier1_users: list, media_folder: str,
                       cycle_secs: int) -> list:
     """
-    Build a flat list of micro-tasks sized to fit within `cycle_secs`.
-
-    Slots are distributed evenly across the window with ±20% jitter so tasks
-    are spread throughout the cycle rather than front-loaded.  Each account's
-    queue is independently randomized — counts, order, and timing all differ.
+    Build a flat list of micro-tasks sized to fit within `cycle_secs`,
+    with a balanced mix across all action types.  Each account's queue
+    is independently randomized — counts, order, and timing all differ.
     """
 
     # ── How many task slots fit? ───────────────────────────────────
-    # Aim for tasks spaced ~2–4 min apart; at least 3 slots always.
+    # Tasks spaced ~2–4 min apart; at least 5 slots so we always get
+    # post + like + follow + comment + something extra.
     avg_gap_secs = random.randint(120, 240)
-    n_slots = max(3, cycle_secs // avg_gap_secs)
+    n_slots = max(5, cycle_secs // avg_gap_secs)
 
-    # ── Build full candidate pool ──────────────────────────────────
-    pool = []
+    # ── Allocate slots per task type ──────────────────────────────
+    counts = {k: max(1, round(n_slots * share)) for k, share in _TASK_MIX.items()}
+    if not tier1_users:
+        counts["follow"] = 0
 
-    for i in range(TEXT_POSTS_PER_CYCLE):
-        pool.append({"type": "post_text", "label": f"text post {i + 1}"})
-    pool.append({"type": "post_image", "label": "image post"})
+    include_unfollow = True
 
-    for _ in range(random.randint(3, 5)):
+    # ── Trim to fit n_slots ───────────────────────────────────────
+    # Drop in tiers: extras → unfollow_check → scroll → core engagement.
+    # This keeps the four core actions (post, like, follow, comment)
+    # whenever possible.
+    def total():
+        return sum(counts.values()) + (1 if include_unfollow else 0)
+
+    while total() > n_slots:
+        # 1. Trim any task type that has > 1 (extras)
+        trimmed = False
+        for k in _TRIM_ORDER:
+            if counts.get(k, 0) > 1:
+                counts[k] -= 1
+                trimmed = True
+                break
+        if trimmed:
+            continue
+
+        # 2. Drop unfollow_check
+        if include_unfollow:
+            include_unfollow = False
+            continue
+
+        # 3. Drop scroll (last optional item)
+        if counts.get("scroll", 0) > 0:
+            counts["scroll"] = 0
+            continue
+
+        # 4. Last resort — drop one core engagement type
+        for k in ["post", "follow", "like", "comment"]:
+            if counts.get(k, 0) > 0:
+                counts[k] = 0
+                break
+        else:
+            break
+
+    # ── Materialize tasks ──────────────────────────────────────────
+    tasks = []
+
+    # Posts (split between text, image, and ghost)
+    from config import GHOST_POSTS_PER_CYCLE
+    n_post = counts.get("post", 0)
+    n_ghost = min(n_post, GHOST_POSTS_PER_CYCLE or 0)
+    remaining_post = n_post - n_ghost
+    n_image = 1 if remaining_post >= 2 else 0
+    n_text  = min(remaining_post - n_image, TEXT_POSTS_PER_CYCLE)
+    for i in range(n_text):
+        tasks.append({"type": "post_text", "label": f"text post {i + 1}"})
+    if n_image:
+        tasks.append({"type": "post_image", "label": "image post"})
+    for i in range(n_ghost):
+        tasks.append({"type": "post_ghost", "label": f"ghost post {i + 1}"})
+
+    for _ in range(counts.get("like", 0)):
         n = random.randint(ACTIVE_LIKES_MIN, max(ACTIVE_LIKES_MIN, ACTIVE_LIKES_MAX))
-        pool.append({"type": "like", "label": f"like {n} posts", "count": n})
+        tasks.append({"type": "like", "label": f"like {n} posts", "count": n})
 
-    if tier1_users:
-        total_follows = random.randint(2, min(5, len(tier1_users)))
-        f_pool = random.sample(tier1_users, total_follows)
-        idx = 0
-        while idx < len(f_pool):
-            size = random.randint(1, min(3, len(f_pool) - idx))
-            pool.append({"type": "follow", "label": f"follow {size} user(s)",
-                         "users": f_pool[idx:idx + size]})
-            idx += size
+    if counts.get("follow", 0) > 0 and tier1_users:
+        n_follow = counts["follow"]
+        sample_size = min(n_follow * 3, len(tier1_users))
+        pool_users = random.sample(tier1_users, sample_size)
+        for _ in range(n_follow):
+            if not pool_users:
+                break
+            size = random.randint(1, min(3, len(pool_users)))
+            batch = pool_users[:size]
+            pool_users = pool_users[size:]
+            tasks.append({"type": "follow", "label": f"follow {size} user(s)", "users": batch})
 
-    for i in range(random.randint(1, 2)):
-        pool.append({"type": "comment", "label": f"comment {i + 1}"})
+    for i in range(counts.get("comment", 0)):
+        tasks.append({"type": "comment", "label": f"comment {i + 1}"})
 
-    for _ in range(random.randint(2, 3)):
+    for _ in range(counts.get("scroll", 0)):
         secs = random.randint(20, 60)
-        pool.append({"type": "scroll", "label": f"scroll {secs}s", "seconds": secs})
+        tasks.append({"type": "scroll", "label": f"scroll {secs}s", "seconds": secs})
 
-    pool.append({"type": "unfollow_check", "label": "unfollow check"})
+    tasks.append({"type": "unfollow_check", "label": "unfollow check"})
 
-    # ── Select tasks to fill available slots ──────────────────────
-    if len(pool) <= n_slots:
-        tasks = pool
-    else:
-        # Always keep highest-priority tasks; sample the rest
-        by_priority = sorted(pool, key=lambda t: _TASK_PRIORITY.get(t["type"], 1), reverse=True)
-        tasks = by_priority[:n_slots]
-
-    # ── Distribute evenly across the cycle window with jitter ─────
+    # ── Distribute fire_at evenly across the cycle window with jitter ──
     random.shuffle(tasks)
     now = datetime.utcnow()
     n = len(tasks)
-    slot_size = cycle_secs / (n + 1)  # even spacing
+    if n == 0:
+        return []
+    slot_size = cycle_secs / (n + 1)
 
     for i, task in enumerate(tasks):
         base = (i + 1) * slot_size
@@ -355,10 +417,20 @@ def _execute_task(bot, username, log, task, media_folder):
         ok = _post_one_image(bot, media_folder)
         _log_step(log, username, task["label"], ok)
 
+    elif t == "post_ghost":
+        log.info(f"[{username}] → {task['label']}")
+        ok = _post_one_ghost(bot, media_folder)
+        _log_step(log, username, task["label"], ok)
+
     elif t == "like":
         count = task.get("count", 2)
         log.info(f"[{username}] → {task['label']}")
         liked = _like_on_feed(bot, count)
+        # Likes can leave hover preview cards open — close them
+        try:
+            bot.dismiss_overlays()
+        except Exception:
+            pass
         _log_step(log, username, f"liked {liked}/{count}", liked > 0)
 
     elif t == "follow":
@@ -411,6 +483,14 @@ def _post_one_image(bot, media_folder):
         return False
 
 
+def _post_one_ghost(bot, media_folder):
+    from tasks.posting import post_ghost
+    try:
+        return post_ghost(bot, media_folder=media_folder)
+    except Exception:
+        return False
+
+
 def _like_on_feed(bot, count: int) -> int:
     """Navigate home and like `count` posts from the feed."""
     from tasks.warmup import _like_visible_posts
@@ -426,21 +506,35 @@ def _like_on_feed(bot, count: int) -> int:
 
 
 def _idle_scroll(bot, seconds=60):
-    """Light feed scroll to keep the session alive.
+    """Mood-based feed scroll to keep the session alive.
 
-    Does NOT navigate home — caller is responsible for being on the feed.
-    This way successive bursts stay in place and scrolling looks continuous.
+    Picks a mood (casual / engaged / fast / distracted) and scrolls with that
+    mood's pacing — variable scroll distance, read pauses, occasional likes.
+    Does NOT navigate home — caller is responsible for being on the feed
+    so successive bursts feel continuous.
     """
-    end = time.time() + seconds
+    from tasks.warmup import _new_mood, _like_visible_posts
+
+    mood = _new_mood()
+    end  = time.time() + seconds
     try:
-        # Make sure we're on the feed if we somehow ended up elsewhere
+        # If we ended up off the feed (post detail / profile), come back
         cur = (bot.driver.current_url or "").lower()
         if "/post/" in cur or "/t/" in cur or "/@" in cur:
             bot.go_home()
 
         while time.time() < end:
-            bot.scroll_down(random.randint(300, 800))
-            time.sleep(random.uniform(1.5, 4))
+            scroll_px = random.randint(mood["scroll_min"], mood["scroll_max"])
+            bot.driver.execute_script(f"window.scrollBy(0, {scroll_px});")
+
+            if random.random() < mood["read_chance"]:
+                time.sleep(random.uniform(mood["read_min"], mood["read_max"]))
+            else:
+                time.sleep(random.uniform(mood["gap_min"], mood["gap_max"]))
+
+            # Occasional opportunistic like while scrolling
+            if random.random() < mood["like_chance"]:
+                _like_visible_posts(bot, 1)
     except Exception:
         pass
 
