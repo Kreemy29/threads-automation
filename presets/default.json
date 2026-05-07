@@ -19,5 +19,5 @@
   "batch_size": 15,
   "mother_post_url": "",
   "adspower_api_key": "",
-  "gemini_key": ""
+  "grok_key": ""
 }

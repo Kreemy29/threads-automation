@@ -598,7 +598,7 @@ class SettingsTab(ctk.CTkFrame):
         self.adspower_api_key = LabeledEntry(gen_card, "AdsPower API Key", "", width=300)
         self.adspower_api_key.pack(fill="x", padx=12, pady=4)
 
-        self.gemini_key       = LabeledEntry(gen_card, "Gemini API Key", "", width=300)
+        self.gemini_key       = LabeledEntry(gen_card, "Grok API Key", "", width=300)
         self.gemini_key.pack(fill="x", padx=12, pady=(4, 12))
 
     def _card(self, parent, title):
@@ -646,7 +646,7 @@ class SettingsTab(ctk.CTkFrame):
             "mother_repost_images_folder": self.mother_repost_images_folder.get(),
             "ghost_posts_per_cycle":       self.ghost_posts.get(),
             "adspower_api_key":     self.adspower_api_key.get(),
-            "gemini_key":           self.gemini_key.get(),
+            "grok_key":             self.gemini_key.get(),
         }
 
     def _from_dict(self, d: dict):
@@ -674,7 +674,7 @@ class SettingsTab(ctk.CTkFrame):
         self.mother_repost_images_folder.set(d.get("mother_repost_images_folder", ""))
         self.ghost_posts.set(d.get("ghost_posts_per_cycle", 0))
         self.adspower_api_key.set(d.get("adspower_api_key", ""))
-        self.gemini_key.set(d.get("gemini_key", d.get("deepseek_key", "")))
+        self.gemini_key.set(d.get("grok_key", d.get("gemini_key", d.get("deepseek_key", ""))))
 
     def _save_preset(self):
         name = self._preset_name.get().strip() or "default"
@@ -768,10 +768,10 @@ class BioGenTab(ctk.CTkFrame):
             side="right", padx=4, pady=6)
 
     def _generate(self):
-        api_key = self._settings.get_settings().get("gemini_key", "").strip()
+        api_key = self._settings.get_settings().get("grok_key", "").strip()
         if not api_key:
             messagebox.showwarning("API Key missing",
-                                   "Enter your Gemini API key in the Settings tab first.")
+                                   "Enter your Grok API key in the Settings tab first.")
             return
 
         niche = self._niche.get().strip()
@@ -1059,7 +1059,7 @@ class App(ctk.CTk):
         config.GHOST_POSTS_PER_CYCLE       = s.get("ghost_posts_per_cycle", 0)
         config.BATCH_SIZE              = s["batch_size"]
         config.ADSPOWER_API_KEY        = s.get("adspower_api_key", "")
-        config.GEMINI_API_KEY          = s.get("gemini_key", "")
+        config.GROK_API_KEY            = s.get("grok_key", "")
 
         raw_warmup = [h.strip().lstrip("@") for h in s.get("warmup_targets", "").split(",") if h.strip()]
         if raw_warmup:

@@ -7,7 +7,7 @@ load_dotenv()
 ADSPOWER_URL      = os.getenv("ADSPOWER_URL", "http://local.adspower.net:50325/api/v1")
 ADSPOWER_API_KEY  = os.getenv("ADSPOWER_API_KEY", "")
 DEEPSEEK_API_KEY  = os.getenv("DEEPSEEK_API_KEY", "")
-GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
+GROK_API_KEY      = os.getenv("GROK_API_KEY", "")
 
 MOTHER_POST_URL = os.getenv("MOTHER_POST_URL", "")
 MOTHER_REPOST_ENABLED = True
@@ -87,8 +87,8 @@ if os.path.exists(_active):
         BATCH_SIZE             = _s.get("batch_size", BATCH_SIZE)
         if _s.get("adspower_api_key"):
             ADSPOWER_API_KEY   = _s["adspower_api_key"]
-        if _s.get("gemini_key"):
-            GEMINI_API_KEY     = _s["gemini_key"]
+        if _s.get("grok_key"):
+            GROK_API_KEY       = _s["grok_key"]
         _raw_w = [h.strip().lstrip("@") for h in _s.get("warmup_targets", "").split(",") if h.strip()]
         if _raw_w:
             WARMUP_TARGETS = [f"https://www.threads.net/@{h}" for h in _raw_w]

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 import data.db as db
 from config import (
-    GEMINI_API_KEY,
+    GROK_API_KEY,
     POST_CYCLE_MIN,
     POST_CYCLE_MAX,
     SESSION_DURATION,
@@ -466,13 +466,13 @@ def _log_step(log, username, step, ok):
 
 def _post_one_text(bot, media_folder):
     from tasks.posting import post_text, _load_lines, _generate_post
-    from config import GEMINI_API_KEY
+    from config import GROK_API_KEY
     import os as _os, random as _r
     examples = _load_lines(_os.path.join(_os.path.dirname(__file__), "content", "text_posts.txt"))
     if not examples:
         return False
     example = random.choice(examples)
-    text = _generate_post(GEMINI_API_KEY, example) or example
+    text = _generate_post(GROK_API_KEY, example) or example
     return post_text(bot, text)
 
 

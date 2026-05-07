@@ -15,7 +15,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), "..", "content")
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GROK_URL   = "https://api.x.ai/v1/chat/completions"
+GROK_MODEL = "grok-4"
 
 
 _PLACEHOLDER_MARKERS = (
@@ -73,7 +74,7 @@ def _pick_image(media_folder: str = "") -> str:
 # ------------------------------------------------------------------
 
 def _generate_post(api_key: str, example: str):
-    """Ask Gemini to write a new post inspired by the example. Returns None on failure."""
+    """Ask Grok to write a new post inspired by the example. Returns None on failure."""
     if not api_key:
         return None
     prompt = (
@@ -94,17 +95,18 @@ def _generate_post(api_key: str, example: str):
     )
     try:
         resp = requests.post(
-            GEMINI_URL,
-            params={"key": api_key},
-            headers={"Content-Type": "application/json"},
+            GROK_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 120, "temperature": 1.0},
+                "model": GROK_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 120,
+                "temperature": 1.0,
             },
             timeout=20,
         )
         resp.raise_for_status()
-        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        text = resp.json()["choices"][0]["message"]["content"].strip()
         return text.strip('"').strip("'") or None
     except Exception:
         return None
@@ -279,7 +281,7 @@ def post_ghost(bot, image_path=None, media_folder: str = ""):
 # ------------------------------------------------------------------
 
 def run_posting_cycle(bot, media_folder: str = ""):
-    from config import GEMINI_API_KEY, TEXT_POSTS_PER_CYCLE
+    from config import GROK_API_KEY, TEXT_POSTS_PER_CYCLE
     log = bot.log
     n = TEXT_POSTS_PER_CYCLE or 4
     log.info(f"[{bot.username}] Starting posting cycle ({n} text + 1 image)")
@@ -289,7 +291,7 @@ def run_posting_cycle(bot, media_folder: str = ""):
 
     for i in range(1, n + 1):
         example = random.choice(examples)
-        generated = _generate_post(GEMINI_API_KEY, example)
+        generated = _generate_post(GROK_API_KEY, example)
         if generated:
             log.info(f"[{bot.username}] AI post {i}/{n}: {generated[:60]}…")
             text = generated

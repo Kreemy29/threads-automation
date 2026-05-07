@@ -24,12 +24,13 @@ from config import (
     OUTREACH_COMMENTS_MAX,
     FOLLOW_BATCH_SIZE,
     UNFOLLOW_AFTER_SECONDS,
-    GEMINI_API_KEY,
+    GROK_API_KEY,
     PIC_COMMENT_RATIO,
 )
 
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), "..", "content")
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GROK_URL   = "https://api.x.ai/v1/chat/completions"
+GROK_MODEL = "grok-4"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -59,17 +60,18 @@ def filter_american_names(names, api_key: str) -> list:
 
     try:
         resp = _requests.post(
-            GEMINI_URL,
-            params={"key": api_key},
-            headers={"Content-Type": "application/json"},
+            GROK_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 300, "temperature": 0.2},
+                "model": GROK_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 300,
+                "temperature": 0.2,
             },
             timeout=20,
         )
         resp.raise_for_status()
-        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
         # Parse returned names — strip bullets/dashes
         filtered = [
             line.lstrip("-• ").strip()
@@ -230,7 +232,7 @@ def _extract_post_context(bot) -> str:
 
 
 def _generate_ai_comment(api_key: str, context: str):
-    """Call Gemini to generate a short, natural comment based on post context."""
+    """Call Grok to generate a short, natural comment based on post context."""
     if not api_key or not context:
         return None
 
@@ -256,20 +258,18 @@ def _generate_ai_comment(api_key: str, context: str):
 
     try:
         resp = _requests.post(
-            GEMINI_URL,
-            params={"key": api_key},
-            headers={"Content-Type": "application/json"},
+            GROK_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "maxOutputTokens": 100,
-                    "temperature": 1.1,
-                },
+                "model": GROK_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 100,
+                "temperature": 1.1,
             },
             timeout=25,
         )
         resp.raise_for_status()
-        comment = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        comment = resp.json()["choices"][0]["message"]["content"].strip()
 
         # Strip surrounding quotes if model added them
         comment = comment.strip('"').strip("'")
@@ -291,7 +291,7 @@ def _generate_ai_comment(api_key: str, context: str):
 def run_outreach_comments(bot, already_done_today: int, api_key: str = None):
     log = bot.log
     if api_key is None:
-        api_key = GEMINI_API_KEY  # use Gemini by default
+        api_key = GROK_API_KEY  # use Grok by default
     target_count = random.randint(OUTREACH_COMMENTS_MIN, OUTREACH_COMMENTS_MAX)
     remaining = target_count - already_done_today
     if remaining <= 0:
