@@ -569,7 +569,7 @@ def run_follow_batch(bot, tier1_users: list):
             log.warning(f"[{bot.username}] Follow error @{username}: {e}")
 
     if followed:
-        db.add_to_follow_queue(bot.username, followed, UNFOLLOW_AFTER_SECONDS)
+        # Tier-1 preset accounts are permanent follows — do NOT queue for unfollow
         db.log_action(bot.username, "follow_batch", "ok", f"{len(followed)} users")
 
 
