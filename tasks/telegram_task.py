@@ -88,7 +88,7 @@ def run_mother_repost(bot):
         log.info(f"[{bot.username}] Quoted mother post (fallback)")
     else:
         log.warning(f"[{bot.username}] Could not repost or quote mother post")
-        return False
+        return (False, False)
 
     time.sleep(3)
     pinned = _pin_latest_post(bot)

@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 import data.db as db
 from config import (
+    GEMINI_API_KEY,
     POST_CYCLE_MIN,
     POST_CYCLE_MAX,
     SESSION_DURATION,
@@ -30,8 +31,8 @@ from config import (
 )
 from core.bot import ThreadsBot
 from tasks.setup import run_setup
-from tasks.warmup import run_warmup
-from tasks.posting import run_posting_cycle
+from tasks.warmup import run_warmup, _new_mood
+from tasks.posting import run_posting_cycle, post_text, post_image, _load_lines, _generate_post
 from tasks.engagement import run_outreach_comments, run_follow_batch, run_due_unfollows
 from tasks.telegram_task import run_mother_repost
 
@@ -163,8 +164,8 @@ def run_account(username, adspower_id, state=None):
     finally:
         try:
             bot.close_browser()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug(f"close_browser failed: {e}")
         log.info("Worker finished")
 
 
@@ -470,16 +471,17 @@ def _post_one_text(bot, media_folder):
     examples = _load_lines(_os.path.join(_os.path.dirname(__file__), "content", "text_posts.txt"))
     if not examples:
         return False
-    example = _r.choice(examples)
+    example = random.choice(examples)
     text = _generate_post(GEMINI_API_KEY, example) or example
     return post_text(bot, text)
 
 
 def _post_one_image(bot, media_folder):
-    from tasks.posting import post_image
     try:
         return post_image(bot, media_folder=media_folder)
-    except Exception:
+    except Exception as e:
+        # Surface upload/compose failures instead of silently returning False.
+        bot.log.warning(f"[{bot.username}] image post raised: {e}")
         return False
 
 
@@ -537,6 +539,7 @@ def _idle_scroll(bot, seconds=60):
                 _like_visible_posts(bot, 1)
     except Exception:
         pass
+
 
 
 # ------------------------------------------------------------------
