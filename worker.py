@@ -56,6 +56,7 @@ def _make_logger(username):
         logger.addHandler(fh)
 
         ch = logging.StreamHandler(sys.stdout)
+        ch.setLevel(logging.INFO)  # console stays clean; DEBUG goes to file only
         ch.setFormatter(logging.Formatter(f"[{username}] %(asctime)s %(message)s", datefmt="%H:%M:%S"))
         ch.stream = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1, closefd=False)
         logger.addHandler(ch)

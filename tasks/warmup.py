@@ -237,22 +237,56 @@ def _like_visible_posts(bot, count):
     try:
         btns = bot.driver.execute_script("""
             const results = [];
-            const articles = document.querySelectorAll('article, div[data-pressable-container="true"]');
-            for (const article of articles) {
-                const btn = article.querySelector(
-                    '[role="button"] svg[aria-label="Like"], svg[aria-label="Like"]'
-                );
-                if (btn) {
-                    let el = btn;
-                    for (let i = 0; i < 6; i++) {
-                        if (el && el.getAttribute && el.getAttribute('role') === 'button') break;
-                        el = el.parentElement;
-                    }
-                    if (el && el.offsetWidth > 0) results.push(el);
+
+            // Strategy 1: SVG with aria-label containing "like" (case-insensitive)
+            const svgs = document.querySelectorAll('svg[aria-label]');
+            for (const svg of svgs) {
+                const label = (svg.getAttribute('aria-label') || '').toLowerCase();
+                if (!label.includes('like')) continue;
+                // Walk up to find the clickable button ancestor
+                let el = svg;
+                for (let i = 0; i < 8; i++) {
+                    if (!el) break;
+                    const role = el.getAttribute && el.getAttribute('role');
+                    const tag  = el.tagName && el.tagName.toLowerCase();
+                    if (role === 'button' || tag === 'button') break;
+                    el = el.parentElement;
+                }
+                if (el && el.offsetWidth > 0) results.push(el);
+            }
+
+            // Strategy 2: role=button with aria-label containing "like"
+            if (results.length === 0) {
+                const btns = document.querySelectorAll('[role="button"][aria-label]');
+                for (const b of btns) {
+                    const label = (b.getAttribute('aria-label') || '').toLowerCase();
+                    if (label.includes('like') && b.offsetWidth > 0) results.push(b);
                 }
             }
+
+            // Strategy 3: any button containing an SVG (post action buttons)
+            if (results.length === 0) {
+                const containers = document.querySelectorAll('article, [data-pressable-container]');
+                for (const c of containers) {
+                    const btns = c.querySelectorAll('[role="button"]');
+                    for (const b of btns) {
+                        if (b.querySelector('svg') && b.offsetWidth > 0) results.push(b);
+                    }
+                    if (results.length >= 10) break;
+                }
+            }
+
             return results;
         """)
+
+        if not btns:
+            # Log what SVG labels exist on the page for debugging
+            labels = bot.driver.execute_script("""
+                return Array.from(document.querySelectorAll('svg[aria-label]'))
+                    .map(s => s.getAttribute('aria-label')).filter(Boolean).slice(0, 20);
+            """)
+            bot.log.debug(f"[{bot.username}] No like buttons found. SVG labels on page: {labels}")
+
         random.shuffle(btns)
         for btn in btns:
             if liked >= count:
@@ -260,7 +294,7 @@ def _like_visible_posts(bot, count):
             try:
                 bot.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
                 time.sleep(random.uniform(0.4, 1.0))
-                btn.click()
+                bot.driver.execute_script("arguments[0].click();", btn)
                 liked += 1
                 time.sleep(random.uniform(1.2, 3))
             except Exception:
@@ -277,14 +311,18 @@ def _like_visible_posts(bot, count):
 def _click_follow(bot) -> bool:
     # Close any hover preview cards or modals so we don't click their Follow
     bot.dismiss_overlays()
+    time.sleep(0.5)
 
+    # XPath strategies — ordered from most to least specific
     for xpath in [
         '//*[@role="button" and normalize-space(.)="Follow"]',
         '//button[normalize-space()="Follow"]',
         '//*[@role="button" and .//span[normalize-space(.)="Follow"]]',
+        '//*[@role="button" and contains(@aria-label,"Follow")]',
+        '//div[@role="button" and contains(.,"Follow") and not(contains(.,"Following"))]',
     ]:
         try:
-            el = WebDriverWait(bot.driver, 5).until(
+            el = WebDriverWait(bot.driver, 4).until(
                 EC.element_to_be_clickable((By.XPATH, xpath))
             )
             bot.smart_click(el)
@@ -292,8 +330,9 @@ def _click_follow(bot) -> bool:
             return True
         except Exception:
             continue
+
+    # JS fallback — skips overlays, tries both "Follow" text and aria-label
     try:
-        # JS fallback that skips buttons inside floating preview cards / dialogs
         result = bot.driver.execute_script("""
             function inOverlay(el) {
                 let n = el;
@@ -302,7 +341,6 @@ def _click_follow(bot) -> bool:
                     if (role === 'dialog' || role === 'tooltip') return true;
                     const cs = window.getComputedStyle(n);
                     if (cs && (cs.position === 'fixed' || cs.position === 'absolute')) {
-                        // Heuristic: floating element with high z-index = overlay
                         const z = parseInt(cs.zIndex || '0', 10);
                         if (z >= 100) return true;
                     }
@@ -312,19 +350,33 @@ def _click_follow(bot) -> bool:
             }
             const btns = document.querySelectorAll('[role="button"], button');
             for (const b of btns) {
-                const txt = (b.innerText || b.textContent || '').trim();
-                if (txt !== 'Follow' || b.offsetWidth === 0) continue;
+                if (b.offsetWidth === 0) continue;
                 if (inOverlay(b)) continue;
+                const txt   = (b.innerText || b.textContent || '').trim();
+                const label = (b.getAttribute('aria-label') || '').toLowerCase();
+                const isFollow = (txt === 'Follow') ||
+                                 (label === 'follow') ||
+                                 (txt.startsWith('Follow') && !txt.includes('Following'));
+                if (!isFollow) continue;
                 b.click();
-                return true;
+                return 'clicked:' + txt;
             }
-            return false;
+            // Debug: return all visible button texts
+            const visible = Array.from(btns)
+                .filter(b => b.offsetWidth > 0)
+                .map(b => (b.innerText || b.textContent || '').trim().slice(0, 30))
+                .filter(t => t.length > 0);
+            return 'not_found:' + JSON.stringify(visible.slice(0, 15));
         """)
-        if result:
+        if result and result.startswith('clicked:'):
+            bot.log.debug(f"[{bot.username}]   Follow clicked via JS ({result})")
             time.sleep(random.uniform(1.0, 2.0))
             return True
-    except Exception:
-        pass
+        else:
+            bot.log.debug(f"[{bot.username}]   Follow JS result: {result}")
+    except Exception as e:
+        bot.log.debug(f"[{bot.username}]   Follow JS error: {e}")
+
     return False
 
 
