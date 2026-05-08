@@ -11,11 +11,11 @@ class AdsPowerManager:
         self._api_key = api_key or ADSPOWER_API_KEY
         self._log = log or logging.getLogger("adspower")
 
-    def _params(self, **kw) -> dict:
-        """Merge API key into every request's query params."""
+    def _headers(self) -> dict:
+        """Return auth headers for every request."""
         if self._api_key:
-            kw["serial_number"] = self._api_key
-        return kw
+            return {"Authorization": f"Bearer {self._api_key}"}
+        return {}
 
     def start_browser(self, user_id):
         """Open an AdsPower profile and return (selenium_address, debug_port) or raise."""
@@ -23,7 +23,8 @@ class AdsPowerManager:
             try:
                 resp = requests.get(
                     f"{self.base_url}/browser/start",
-                    params=self._params(user_id=user_id, ip_tab=1, cdp_mask=1),
+                    params={"user_id": user_id, "ip_tab": 1, "cdp_mask": 1},
+                    headers=self._headers(),
                     timeout=30,
                 )
                 data = resp.json()
@@ -52,7 +53,8 @@ class AdsPowerManager:
         try:
             resp = requests.get(
                 f"{self.base_url}/browser/stop",
-                params=self._params(user_id=user_id),
+                params={"user_id": user_id},
+                headers=self._headers(),
                 timeout=15,
             )
             data = resp.json()
@@ -68,7 +70,7 @@ class AdsPowerManager:
         try:
             resp = requests.get(
                 f"{self.base_url}/user/list",
-                params=self._params(),
+                headers=self._headers(),
                 timeout=15,
             )
             data = resp.json()
@@ -82,7 +84,8 @@ class AdsPowerManager:
         try:
             resp = requests.get(
                 f"{self.base_url}/user/list",
-                params=self._params(user_id=user_id),
+                params={"user_id": user_id},
+                headers=self._headers(),
                 timeout=15,
             )
             data = resp.json()
