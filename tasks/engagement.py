@@ -377,7 +377,7 @@ def _follow_american_commenters(bot, post_url: str, api_key: str, log):
 def _get_recent_post_url(bot, profile_url: str):
     bot.go(profile_url)
 
-    # Wait for at least one post article to appear (profiles lazy-load posts)
+    # Wait for the profile feed to start rendering
     try:
         WebDriverWait(bot.driver, 10).until(
             EC.presence_of_element_located((By.XPATH,
@@ -388,40 +388,65 @@ def _get_recent_post_url(bot, profile_url: str):
         pass
     time.sleep(random.uniform(2, 3))
 
-    # Strategy 1: JS sweep — most reliable across DOM variants
+    # Strategy 1: JS sweep for explicit /post/ hrefs (fast, works for most profiles)
     def _js_find():
         return bot.driver.execute_script("""
             const anchors = Array.from(document.querySelectorAll('a[href]'));
             for (const a of anchors) {
                 const h = a.href || '';
-                // Must be a post URL with a real post ID (not just a profile link)
                 if (h.includes('/post/') && h.split('/post/')[1].length > 3) return h;
             }
-            // Debug: what hrefs exist?
-            const sample = anchors.map(a => a.href).filter(Boolean).slice(0, 25);
-            return 'debug:' + JSON.stringify(sample);
+            return null;
         """)
 
     result = _js_find()
-    if result and not result.startswith('debug:'):
+    if result:
         return result
 
-    if result and result.startswith('debug:'):
-        bot.log.debug(f"[{bot.username}] No /post/ links on {profile_url} — hrefs: {result[6:120]}")
+    # Strategy 2: scroll down and retry (virtualised feeds need a scroll to render)
+    for _ in range(2):
+        try:
+            bot.driver.execute_script("window.scrollBy(0, 500);")
+            time.sleep(2)
+            result = _js_find()
+            if result:
+                return result
+        except Exception:
+            pass
 
-    # Strategy 2: scroll and retry (some profiles need a scroll to render posts)
+    # Strategy 3: click the first visible post and capture the resulting URL.
+    # Celebrity profiles often lazy-load posts but the article cards are clickable.
     try:
-        bot.driver.execute_script("window.scrollBy(0, 500);")
-        time.sleep(2.5)
-        result = _js_find()
-        if result and not result.startswith('debug:'):
-            return result
-        # One more scroll attempt
-        bot.driver.execute_script("window.scrollBy(0, 500);")
-        time.sleep(2)
-        result = _js_find()
-        if result and not result.startswith('debug:'):
-            return result
+        post_el = bot.driver.execute_script("""
+            // Find the first visible article or post-card container
+            for (const sel of [
+                'article a[href]',
+                '[data-pressable-container] a[href]',
+                'a[href*="/@"][href*="/post"]',
+            ]) {
+                const el = document.querySelector(sel);
+                if (el && el.offsetWidth > 0) return el;
+            }
+            // Broader fallback: any visible anchor that looks post-ish
+            const all = document.querySelectorAll('a[href]');
+            for (const a of all) {
+                const h = a.href || '';
+                if (h.includes('threads.') && h.includes('/@') &&
+                    !h.endsWith('/' + h.split('/@')[1].split('/')[0])) {
+                    if (a.offsetWidth > 0) return a;
+                }
+            }
+            return null;
+        """)
+        if post_el:
+            bot.driver.execute_script("arguments[0].click();", post_el)
+            time.sleep(3)
+            url = bot.driver.current_url
+            if "/post/" in url:
+                return url
+            # Navigate back to profile if we ended up somewhere else
+            bot.go(profile_url)
+            time.sleep(2)
     except Exception:
         pass
 

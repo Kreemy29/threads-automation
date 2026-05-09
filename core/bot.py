@@ -361,66 +361,70 @@ class ThreadsBot:
             (By.CSS_SELECTOR, 'div[aria-label="Create"]'),
         ]
 
-        # Textbox XPaths tried in order — covers both Lexical (contenteditable) and
-        # ARIA-role variants.  Dialog-scoped selectors are tried first so we don't
-        # accidentally match a background feed textbox.
-        _TB_XPATHS = [
-            '//div[@role="dialog"]//div[@role="textbox"]',
-            '//div[@role="dialog"]//div[@contenteditable="true"]',
-            '//div[@role="textbox"]',
-            '//div[@contenteditable="true"]',
-        ]
+        def _js_grab_compose_textbox(self):
+            """JS-based textbox finder that avoids feed/nav containers."""
+            return self.driver.execute_script("""
+                // 1. activeElement — set by Threads when the compose field is focused
+                const ae = document.activeElement;
+                if (ae && ae !== document.body && ae !== document.documentElement) {
+                    const role = ae.getAttribute('role');
+                    const ce   = ae.getAttribute('contenteditable');
+                    if (role === 'textbox' || ce === 'true') return ae;
+                }
 
-        def _find_textbox(timeout_each=8):
-            for xp in _TB_XPATHS:
-                try:
-                    el = WebDriverWait(self.driver, timeout_each).until(
-                        EC.presence_of_element_located((By.XPATH, xp))
-                    )
-                    return el
-                except Exception:
-                    continue
-            return None
+                // 2. Walk every contenteditable / textbox div, skipping:
+                //    - nav bars
+                //    - feed post containers (data-pressable-container)
+                //    - things inside a post article (comment reply boxes)
+                const candidates = document.querySelectorAll(
+                    '[role="textbox"], [contenteditable="true"]'
+                );
+                for (const el of candidates) {
+                    if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
+                    // Skip nav / sidebar items
+                    if (el.closest('nav') || el.closest('header')) continue;
+                    // Skip feed post cards (the "reply" inline boxes)
+                    if (el.closest('[data-pressable-container]')) continue;
+                    // Skip comment reply dialogs that are already nested in a post
+                    if (el.closest('article')) continue;
+                    // Must be editable
+                    if (el.getAttribute('contenteditable') === 'false') continue;
+                    return el;
+                }
+                return null;
+            """)
 
         clicked = False
-        clicked_el = None
         for by, sel in selectors:
             try:
                 el = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((by, sel)))
                 self.smart_click(el)
                 self.log.info(f"Compose opened via: {sel[:60]}")
                 clicked = True
-                clicked_el = el
 
-                # If the element we just clicked IS the compose textbox (inline "Empty
-                # text field" area), wait briefly then try to return it directly before
-                # the full modal-wait path.
-                if "text field" in sel.lower() or "what's new" in sel.lower():
-                    time.sleep(2)
+                # Give the compose overlay time to animate in, then try JS grab.
+                # Use a short poll loop (500ms × 8 = 4s max) so we don't wait
+                # blindly when the textbox is already ready.
+                for _poll in range(8):
+                    time.sleep(0.5)
                     try:
-                        # The clicked element may transform; re-locate it robustly.
-                        tb = self.driver.execute_script("""
-                            // Find the focused or first visible contenteditable/textbox
-                            const focused = document.activeElement;
-                            if (focused && (focused.getAttribute('role') === 'textbox' ||
-                                focused.getAttribute('contenteditable') === 'true')) {
-                                return focused;
-                            }
-                            // Fall back to first visible one
-                            for (const sel of ['[role="textbox"]','[contenteditable="true"]']) {
-                                const el = document.querySelector(sel);
-                                if (el && el.offsetWidth > 0) return el;
-                            }
-                            return null;
-                        """)
+                        tb = _js_grab_compose_textbox(self)
                         if tb:
-                            self.log.info(f"[{self.username}] Compose textbox returned via inline path")
+                            self.log.info(f"[{self.username}] Compose textbox found (poll {_poll+1})")
                             return tb
                     except Exception:
                         pass
-                    time.sleep(2)  # let compose modal animate in
-                else:
-                    time.sleep(4)  # give the modal time to fully render
+
+                # Still not found — wait an extra 3s then retry once more
+                time.sleep(3)
+                try:
+                    tb = _js_grab_compose_textbox(self)
+                    if tb:
+                        self.log.info(f"[{self.username}] Compose textbox found after extended wait")
+                        return tb
+                except Exception:
+                    pass
+
                 break
             except Exception:
                 continue
@@ -456,18 +460,40 @@ class ThreadsBot:
                     self.log.info(f"Compose opened via JS fallback: {result}")
                     time.sleep(3)
                     clicked = True
+                    try:
+                        tb = _js_grab_compose_textbox(self)
+                        if tb:
+                            return tb
+                    except Exception:
+                        pass
             except Exception as e:
                 self.log.warning(f"JS compose fallback failed: {e}")
 
-        # Wait for the textbox to appear — try each selector with a short timeout
-        # then loop for a second pass before giving up.
-        for pass_num in range(3):
-            tb = _find_textbox(timeout_each=8)
-            if tb:
-                return tb
-            if clicked:
-                self.log.info(f"[{self.username}] Compose textbox not found (pass {pass_num+1}/3) — waiting 5s")
-                time.sleep(5)
+        if not clicked:
+            self.log.warning(f"[{self.username}] Could not open compose dialog")
+            return None
+
+        # Last resort: refresh home and try the whole flow once more
+        self.log.warning(f"[{self.username}] Compose textbox not found — refreshing home and retrying")
+        try:
+            self.driver.refresh()
+            time.sleep(4)
+            self.scroll_to_top()
+            time.sleep(1)
+            for by, sel in selectors[:3]:  # only try the most reliable selectors
+                try:
+                    el = WebDriverWait(self.driver, 8).until(EC.element_to_be_clickable((by, sel)))
+                    self.smart_click(el)
+                    time.sleep(3)
+                    tb = _js_grab_compose_textbox(self)
+                    if tb:
+                        self.log.info(f"[{self.username}] Compose textbox found after refresh")
+                        return tb
+                    break
+                except Exception:
+                    continue
+        except Exception as e:
+            self.log.warning(f"[{self.username}] Refresh retry failed: {e}")
 
         self.log.warning(f"[{self.username}] Could not open compose dialog")
         return None
