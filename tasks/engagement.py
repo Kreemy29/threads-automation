@@ -366,38 +366,38 @@ def run_feed_engagement(bot, already_done_today: int, api_key: str = None):
         username  = post_info["username"]
         dname     = post_info["display_name"]
 
+        # ── This poster is an American male → like, comment, follow ───────────
         try:
-            log.info(f"[{bot.username}] Engaging @{username} ({dname}) — {post_url}")
+            log.info(f"[{bot.username}] American male detected: @{username} ({dname})")
 
-            # ── Like the post (navigate, read, like) ──────────────────────────
+            # 1. Go to the post and LIKE it
             bot.go(post_url)
             time.sleep(random.uniform(3, 5))
             _like_current_post(bot)
+            log.info(f"[{bot.username}]   Liked @{username}'s post")
 
-            # ── Comment — context extracted fresh on the post page ─────────────
-            # _post_comment_on navigates to the post itself, reads the content,
-            # generates the AI comment from what it actually sees, then submits.
+            # 2. COMMENT — generated from the actual post content on the page
             ok = _post_comment_on(bot, post_url, api_key, fallback_comments)
             if ok:
                 done += 1
                 db.log_action(bot.username, "feed_comment", "ok", post_url)
-                log.info(f"[{bot.username}] ✓ Comment posted on @{username} ({done}/{remaining})")
+                log.info(f"[{bot.username}]   Commented on @{username}'s post ({done}/{remaining})")
 
-            # ── Follow the poster (will be unfollowed after UNFOLLOW_AFTER_SECONDS) ──
+            # 3. FOLLOW — queued for auto-unfollow after UNFOLLOW_AFTER_SECONDS
             bot.go(f"{bot.BASE_URL}/@{username}")
             time.sleep(random.uniform(1.5, 3))
             if _click_follow_button(bot):
                 db.add_to_follow_queue(bot.username, [username], UNFOLLOW_AFTER_SECONDS)
-                log.info(f"[{bot.username}] ✓ Followed @{username} (queued for unfollow)")
+                log.info(f"[{bot.username}]   Followed @{username}")
 
-            # Human-like pause between targets
+            # Human-like pause before next target
             time.sleep(random.uniform(45, 90))
 
         except Exception as e:
             err = str(e)
             if "invalid session id" in err or "disconnected" in err:
                 raise
-            log.warning(f"[{bot.username}] Feed engagement error @{username}: {e}")
+            log.warning(f"[{bot.username}] Engagement error @{username}: {e}")
 
     log.info(f"[{bot.username}] Feed engagement done — {done}/{remaining} comments, "
              f"{len(american_names)} American posters found")
@@ -429,16 +429,13 @@ def _collect_feed_posts(bot) -> list:
                 const username = m ? m[1] : '';
                 if (!username) continue;
 
-                // Display name: first short non-empty span that isn't the username
+                // Display name: look INSIDE the author link for a span
+                // (that's where Threads puts the profile name, not post text)
                 let displayName = username;
-                const spans = c.querySelectorAll('span');
-                for (const s of spans) {
-                    const t = (s.textContent || '').trim();
-                    if (t && t.length >= 2 && t.length <= 40 &&
-                        !t.startsWith('@') && t !== username) {
-                        displayName = t;
-                        break;
-                    }
+                const nameSpan = authorLink.querySelector('span');
+                if (nameSpan) {
+                    const t = (nameSpan.textContent || '').trim();
+                    if (t && t.length >= 2 && t.length <= 50) displayName = t;
                 }
 
                 seen.add(postLink.href);
