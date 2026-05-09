@@ -33,7 +33,7 @@ from core.bot import ThreadsBot
 from tasks.setup import run_setup
 from tasks.warmup import run_warmup, _new_mood
 from tasks.posting import run_posting_cycle, post_text, post_image, _load_lines, _generate_post
-from tasks.engagement import run_outreach_comments, run_follow_batch, run_due_unfollows
+from tasks.engagement import run_feed_engagement, run_follow_batch, run_due_unfollows
 from tasks.telegram_task import run_mother_repost
 
 
@@ -389,7 +389,7 @@ def _execute_task(bot, username, log, task, media_folder):
     elif t == "comment":
         log.info(f"[{username}] → {task['label']}")
         daily = db.get_daily_counts(username)
-        done = run_outreach_comments(bot, daily["comments"])
+        done = run_feed_engagement(bot, daily["comments"])
         _log_step(log, username, f"comment ({done} posted)", done > 0)
 
     elif t == "scroll":

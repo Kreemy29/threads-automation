@@ -298,80 +298,201 @@ def _generate_ai_comment(api_key: str, context: str):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Outreach comments
+# Feed-based engagement  (replaces celebrity-outreach approach)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_outreach_comments(bot, already_done_today: int, api_key: str = None):
+def run_feed_engagement(bot, already_done_today: int, api_key: str = None):
+    """
+    Scroll the home feed, collect visible posts, filter posters for American
+    male names via Grok, then for each match: like the post, leave an
+    AI-generated comment, and follow the poster (queued for unfollow later).
+
+    Number of comments is controlled by OUTREACH_COMMENTS_MIN/MAX settings.
+    """
     log = bot.log
     if api_key is None:
-        api_key = GROK_API_KEY  # use Grok by default
+        api_key = GROK_API_KEY
+
     target_count = random.randint(OUTREACH_COMMENTS_MIN, OUTREACH_COMMENTS_MAX)
     remaining = target_count - already_done_today
     if remaining <= 0:
-        log.info(f"[{bot.username}] Outreach quota met ({already_done_today})")
+        log.info(f"[{bot.username}] Comment quota met ({already_done_today})")
         return 0
 
     fallback_comments = _load_lines("comments.txt")
-    done = 0
 
-    targets = random.sample(OUTREACH_TARGETS, min(remaining, len(OUTREACH_TARGETS)))
-    for target_url in targets:
-        if done >= remaining:
+    # ── Collect posts from the home feed by scrolling ──────────────────────────
+    bot.go_home()
+    time.sleep(random.uniform(2, 3))
+
+    feed_posts = []
+    seen_urls = set()
+    for _scroll in range(5):          # scroll up to 5 times to load enough posts
+        bot.driver.execute_script("window.scrollBy(0, 700);")
+        time.sleep(random.uniform(1.2, 2))
+        batch = _collect_feed_posts(bot)
+        for p in batch:
+            if p["post_url"] not in seen_urls:
+                seen_urls.add(p["post_url"])
+                feed_posts.append(p)
+        if len(feed_posts) >= remaining * 4:   # collect plenty to filter from
             break
-        try:
-            post_url = _get_recent_post_url(bot, target_url)
-            if not post_url:
-                continue
 
-            # Scan commenters and follow American-looking ones
-            _follow_american_commenters(bot, post_url, api_key, log)
+    if not feed_posts:
+        log.warning(f"[{bot.username}] No posts found on home feed — skipping engagement")
+        return 0
 
-            ok = _post_comment_on(bot, post_url, api_key, fallback_comments)
-            if ok:
-                done += 1
-                db.log_action(bot.username, "outreach_comment", "ok", post_url)
-                log.info(f"[{bot.username}] Comment posted ({done}/{remaining})")
+    log.info(f"[{bot.username}] Feed: {len(feed_posts)} posts collected, filtering for American males…")
 
-            time.sleep(random.uniform(60, 180))
-        except Exception as e:
-            log.warning(f"[{bot.username}] Outreach error for {target_url}: {e}")
-
-    return done
-
-
-def _follow_american_commenters(bot, post_url: str, api_key: str, log):
-    """
-    Visit a post, extract commenter names, filter for American-sounding ones,
-    follow up to 5 of them.
-    """
-    bot.go(post_url)
-    time.sleep(2)
-
-    pairs = _extract_commenter_names(bot)
-    if not pairs:
-        return
-
-    display_names = [p[0] for p in pairs]
-    username_map  = {p[0]: p[1] for p in pairs}
+    # ── Filter for American male names ─────────────────────────────────────────
+    display_names = [p["display_name"] for p in feed_posts]
+    name_to_post  = {p["display_name"]: p for p in feed_posts}
 
     if api_key:
         american_names = filter_american_names(display_names, api_key)
-        log.info(f"[{bot.username}] American commenters: {american_names[:5]} / {len(display_names)} total")
+        log.info(f"[{bot.username}] American male posters: {american_names} ({len(american_names)}/{len(display_names)})")
     else:
-        american_names = display_names  # no filter without API key
+        american_names = display_names   # no filter without API key
 
-    to_follow = [username_map[n] for n in american_names[:5] if n in username_map]
+    targets = [name_to_post[n] for n in american_names if n in name_to_post]
+    random.shuffle(targets)
 
-    for username in to_follow:
+    done = 0
+    for post_info in targets:
+        if done >= remaining:
+            break
+
+        post_url = post_info["post_url"]
+        username  = post_info["username"]
+        dname     = post_info["display_name"]
+
         try:
-            bot.go(f"https://www.threads.net/@{username}")
-            time.sleep(1.5)
+            log.info(f"[{bot.username}] Engaging @{username} ({dname}) — {post_url}")
+            bot.go(post_url)
+            time.sleep(random.uniform(3, 5))
+
+            # Extract context for the comment
+            context = _extract_post_context(bot)
+            log.info(f"[{bot.username}] Post context ({len(context)} chars): {context[:100]}")
+
+            # Generate AI comment
+            comment_text = None
+            if api_key and context:
+                comment_text = _generate_ai_comment(api_key, context)
+                if comment_text:
+                    log.info(f"[{bot.username}] AI comment: {comment_text[:80]}")
+
+            if not comment_text:
+                comment_text = random.choice(fallback_comments) if fallback_comments else "Love this 🔥"
+
+            # ── Like the post ──────────────────────────────────────────────────
+            _like_current_post(bot)
+
+            # ── Comment on the post ────────────────────────────────────────────
+            ok = _post_comment_on(bot, post_url, api_key, fallback_comments,
+                                  prefilled_comment=comment_text)
+            if ok:
+                done += 1
+                db.log_action(bot.username, "feed_comment", "ok", post_url)
+                log.info(f"[{bot.username}] ✓ Comment posted on @{username} ({done}/{remaining})")
+
+            # ── Follow the poster (will be unfollowed after UNFOLLOW_AFTER_SECONDS) ──
+            bot.go(f"{bot.BASE_URL}/@{username}")
+            time.sleep(random.uniform(1.5, 3))
             if _click_follow_button(bot):
-                log.info(f"[{bot.username}] Followed American commenter @{username}")
                 db.add_to_follow_queue(bot.username, [username], UNFOLLOW_AFTER_SECONDS)
-            time.sleep(random.uniform(2, 5))
+                log.info(f"[{bot.username}] ✓ Followed @{username} (queued for unfollow)")
+
+            # Human-like pause between targets
+            time.sleep(random.uniform(45, 90))
+
         except Exception as e:
-            log.warning(f"[{bot.username}] Could not follow @{username}: {e}")
+            err = str(e)
+            if "invalid session id" in err or "disconnected" in err:
+                raise
+            log.warning(f"[{bot.username}] Feed engagement error @{username}: {e}")
+
+    log.info(f"[{bot.username}] Feed engagement done — {done}/{remaining} comments, "
+             f"{len(american_names)} American posters found")
+    return done
+
+
+def _collect_feed_posts(bot) -> list:
+    """
+    Return list of dicts {post_url, username, display_name} from currently
+    visible articles on the home feed.
+    """
+    try:
+        raw = bot.driver.execute_script("""
+            const results = [];
+            const seen = new Set();
+            const containers = document.querySelectorAll(
+                'article, [data-pressable-container="true"]'
+            );
+            for (const c of containers) {
+                // Must have a /post/ link
+                const postLink = c.querySelector('a[href*="/post/"]');
+                if (!postLink || !postLink.href) continue;
+                if (seen.has(postLink.href)) continue;
+
+                // Must have an author @-link
+                const authorLink = c.querySelector('a[href*="/@"]');
+                if (!authorLink) continue;
+                const m = (authorLink.href || '').match(/\\/@([^/?#]+)/);
+                const username = m ? m[1] : '';
+                if (!username) continue;
+
+                // Display name: first short non-empty span that isn't the username
+                let displayName = username;
+                const spans = c.querySelectorAll('span');
+                for (const s of spans) {
+                    const t = (s.textContent || '').trim();
+                    if (t && t.length >= 2 && t.length <= 40 &&
+                        !t.startsWith('@') && t !== username) {
+                        displayName = t;
+                        break;
+                    }
+                }
+
+                seen.add(postLink.href);
+                results.push({
+                    post_url:     postLink.href,
+                    username:     username,
+                    display_name: displayName,
+                });
+                if (results.length >= 30) break;
+            }
+            return JSON.stringify(results);
+        """)
+        import json
+        return json.loads(raw) if raw else []
+    except Exception:
+        return []
+
+
+def _like_current_post(bot):
+    """Like the first (top-level) post on the current page."""
+    try:
+        result = bot.driver.execute_script("""
+            const svgs = document.querySelectorAll('svg[aria-label]');
+            for (const svg of svgs) {
+                if (!(svg.getAttribute('aria-label') || '').toLowerCase().includes('like')) continue;
+                let el = svg;
+                for (let i = 0; i < 8; i++) {
+                    if (!el) break;
+                    if (el.getAttribute('role') === 'button' || el.tagName === 'BUTTON') {
+                        el.click();
+                        return 'liked';
+                    }
+                    el = el.parentElement;
+                }
+            }
+            return 'not-found';
+        """)
+        if result == 'liked':
+            time.sleep(random.uniform(0.8, 1.5))
+    except Exception:
+        pass
 
 
 def _get_recent_post_url(bot, profile_url: str):
@@ -469,28 +590,35 @@ def _get_recent_post_url(bot, profile_url: str):
     return None
 
 
-def _post_comment_on(bot, post_url: str, api_key: str, fallback_comments: list) -> bool:
+def _post_comment_on(bot, post_url: str, api_key: str, fallback_comments: list,
+                     prefilled_comment: str = None) -> bool:
+    """Navigate to post_url and leave a comment.
+
+    If prefilled_comment is given (already generated by the caller) it is used
+    directly and no second Grok call is made.  Otherwise context is extracted
+    and Grok is called here.
+    """
     log = bot.log
     bot.go(post_url)
     time.sleep(random.uniform(2.5, 4))
 
-    # Extract post context BEFORE clicking reply — full post text is visible here
-    context = _extract_post_context(bot)
-    log.info(f"[{bot.username}] Post context ({len(context)} chars): {context[:120]}")
+    if prefilled_comment:
+        comment_text = prefilled_comment
+    else:
+        # Extract post context BEFORE clicking reply
+        context = _extract_post_context(bot)
+        log.info(f"[{bot.username}] Post context ({len(context)} chars): {context[:120]}")
 
-    # Generate AI comment while we can still see the full post
-    comment_text = None
-    if api_key and context:
-        comment_text = _generate_ai_comment(api_key, context)
-        if comment_text:
-            log.info(f"[{bot.username}] AI comment: {comment_text[:80]}")
+        comment_text = None
+        if api_key and context:
+            comment_text = _generate_ai_comment(api_key, context)
+            if comment_text:
+                log.info(f"[{bot.username}] AI comment: {comment_text[:80]}")
 
-    if not comment_text:
-        if fallback_comments:
-            comment_text = random.choice(fallback_comments)
-        else:
-            comment_text = "Love this 🔥"
-        log.info(f"[{bot.username}] Fallback comment: {comment_text[:60]}")
+        if not comment_text:
+            comment_text = (random.choice(fallback_comments)
+                            if fallback_comments else "Love this 🔥")
+            log.info(f"[{bot.username}] Fallback comment: {comment_text[:60]}")
 
     # Click the first (main post) reply button
     reply_btns = bot.driver.find_elements(By.CSS_SELECTOR, "svg[aria-label='Reply']")
