@@ -58,25 +58,51 @@ class ThreadsBot:
             raise RuntimeError(f"Could not connect to Chrome after 10 attempts: {last_err}")
 
         self.log.info(f"Browser opened for {self.username}")
+        # Give AdsPower time to handle proxy auth before we try to navigate
+        time.sleep(8)
         self._navigate_to_threads()
         return self.driver
 
     def _navigate_to_threads(self):
-        """Navigate to Threads home and wait for the page to be interactive."""
-        for attempt in range(3):
+        """Navigate to Threads home and wait for the page to be interactive.
+        Handles proxy auth dialogs by dismissing them and waiting for the
+        proxy session to establish before retrying.
+        """
+        for attempt in range(6):
             try:
+                # Dismiss any proxy auth / native dialog that may be blocking
+                try:
+                    alert = self.driver.switch_to.alert
+                    alert.dismiss()
+                    self.log.info("Dismissed browser dialog before navigation")
+                    time.sleep(2)
+                except Exception:
+                    pass
+
                 self.driver.get(self.BASE_URL)
-                # Wait for body to be present (page loaded at all)
-                WebDriverWait(self.driver, 20).until(
+
+                # Wait for body — if proxy auth is pending this will time out
+                WebDriverWait(self.driver, 15).until(
                     EC.presence_of_element_located((By.TAG_NAME, "body"))
                 )
                 time.sleep(random.uniform(2, 3))
                 self.log.info(f"Navigated to Threads ({self.driver.current_url})")
                 return
             except Exception as e:
-                self.log.warning(f"Navigation attempt {attempt + 1} failed: {e}")
-                time.sleep(3)
-        self.log.warning("Could not navigate to Threads after 3 attempts — continuing anyway")
+                err = str(e)
+                if "ERR_PROXY_AUTH_REQUESTED" in err or "PROXY_AUTH" in err:
+                    wait = 10 + attempt * 5  # 10, 15, 20, 25, 30, 35s
+                    self.log.warning(
+                        f"Proxy auth pending (attempt {attempt + 1}/6) — waiting {wait}s for proxy to authenticate"
+                    )
+                    time.sleep(wait)
+                elif "invalid session id" in err or "disconnected" in err:
+                    self.log.error("Browser session lost during navigation")
+                    raise
+                else:
+                    self.log.warning(f"Navigation attempt {attempt + 1} failed: {e}")
+                    time.sleep(5)
+        self.log.warning("Could not navigate to Threads after 6 attempts — continuing anyway")
 
     def close_browser(self):
         if self.driver:
@@ -107,11 +133,30 @@ class ThreadsBot:
 
     def go(self, url):
         self._ensure_window()
-        self.driver.get(url)
-        WebDriverWait(self.driver, 20).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
-        time.sleep(random.uniform(2, 3.5))
+        for attempt in range(3):
+            try:
+                # Dismiss any pending proxy auth dialog
+                try:
+                    self.driver.switch_to.alert.dismiss()
+                    time.sleep(2)
+                except Exception:
+                    pass
+                self.driver.get(url)
+                WebDriverWait(self.driver, 20).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
+                time.sleep(random.uniform(2, 3.5))
+                return
+            except Exception as e:
+                if "ERR_PROXY_AUTH_REQUESTED" in str(e) or "PROXY_AUTH" in str(e):
+                    self.log.warning(f"Proxy auth on go({url}) — waiting 15s")
+                    time.sleep(15)
+                elif "invalid session id" in str(e) or "disconnected" in str(e):
+                    raise
+                elif attempt < 2:
+                    time.sleep(3)
+                else:
+                    raise
 
     def go_home(self):
         self.go(self.BASE_URL)
@@ -271,6 +316,39 @@ class ThreadsBot:
         self.scroll_to_top()
         time.sleep(1)
 
+        # Verify Threads actually loaded — if proxy is still authenticating the page
+        # will be blank and no compose button will exist.  Give it up to 30s extra.
+        threads_loaded = False
+        for _wait_attempt in range(3):
+            try:
+                cur = (self.driver.current_url or "").lower()
+                if "threads.com" not in cur and "threads.net" not in cur:
+                    self.log.warning(f"[{self.username}] Not on Threads ({cur[:60]}) — re-navigating")
+                    self._navigate_to_threads()
+                    time.sleep(3)
+                    continue
+                # Check for any known Threads UI element
+                WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.XPATH,
+                        '//div[@role="textbox"] | '
+                        '//span[contains(text(),"What\'s new?")] | '
+                        '//div[contains(text(),"What\'s new?")] | '
+                        '//*[@aria-label="New post"] | '
+                        '//div[@aria-label="Create"]'
+                    ))
+                )
+                threads_loaded = True
+                break
+            except Exception:
+                self.log.warning(
+                    f"[{self.username}] Threads UI not detected on home (attempt {_wait_attempt+1}/3) — waiting"
+                )
+                time.sleep(10)
+
+        if not threads_loaded:
+            self.log.warning(f"[{self.username}] Threads home did not load — skipping compose")
+            return None
+
         # Ordered by likelihood — aria-label is most stable
         selectors = [
             (By.XPATH, '//div[@aria-label="Empty text field. Type to compose a new post."]'),
@@ -283,14 +361,66 @@ class ThreadsBot:
             (By.CSS_SELECTOR, 'div[aria-label="Create"]'),
         ]
 
+        # Textbox XPaths tried in order — covers both Lexical (contenteditable) and
+        # ARIA-role variants.  Dialog-scoped selectors are tried first so we don't
+        # accidentally match a background feed textbox.
+        _TB_XPATHS = [
+            '//div[@role="dialog"]//div[@role="textbox"]',
+            '//div[@role="dialog"]//div[@contenteditable="true"]',
+            '//div[@role="textbox"]',
+            '//div[@contenteditable="true"]',
+        ]
+
+        def _find_textbox(timeout_each=8):
+            for xp in _TB_XPATHS:
+                try:
+                    el = WebDriverWait(self.driver, timeout_each).until(
+                        EC.presence_of_element_located((By.XPATH, xp))
+                    )
+                    return el
+                except Exception:
+                    continue
+            return None
+
         clicked = False
+        clicked_el = None
         for by, sel in selectors:
             try:
                 el = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((by, sel)))
                 self.smart_click(el)
                 self.log.info(f"Compose opened via: {sel[:60]}")
-                time.sleep(4)  # give the modal time to fully render
                 clicked = True
+                clicked_el = el
+
+                # If the element we just clicked IS the compose textbox (inline "Empty
+                # text field" area), wait briefly then try to return it directly before
+                # the full modal-wait path.
+                if "text field" in sel.lower() or "what's new" in sel.lower():
+                    time.sleep(2)
+                    try:
+                        # The clicked element may transform; re-locate it robustly.
+                        tb = self.driver.execute_script("""
+                            // Find the focused or first visible contenteditable/textbox
+                            const focused = document.activeElement;
+                            if (focused && (focused.getAttribute('role') === 'textbox' ||
+                                focused.getAttribute('contenteditable') === 'true')) {
+                                return focused;
+                            }
+                            // Fall back to first visible one
+                            for (const sel of ['[role="textbox"]','[contenteditable="true"]']) {
+                                const el = document.querySelector(sel);
+                                if (el && el.offsetWidth > 0) return el;
+                            }
+                            return null;
+                        """)
+                        if tb:
+                            self.log.info(f"[{self.username}] Compose textbox returned via inline path")
+                            return tb
+                    except Exception:
+                        pass
+                    time.sleep(2)  # let compose modal animate in
+                else:
+                    time.sleep(4)  # give the modal time to fully render
                 break
             except Exception:
                 continue
@@ -329,17 +459,15 @@ class ThreadsBot:
             except Exception as e:
                 self.log.warning(f"JS compose fallback failed: {e}")
 
-        # Wait for the textbox to appear
-        for timeout in [15, 20]:
-            try:
-                textbox = WebDriverWait(self.driver, timeout).until(
-                    EC.presence_of_element_located((By.XPATH, '//div[@role="textbox"]'))
-                )
-                return textbox
-            except Exception:
-                if timeout == 15 and clicked:
-                    self.log.info("Textbox not found yet, waiting longer...")
-                continue
+        # Wait for the textbox to appear — try each selector with a short timeout
+        # then loop for a second pass before giving up.
+        for pass_num in range(3):
+            tb = _find_textbox(timeout_each=8)
+            if tb:
+                return tb
+            if clicked:
+                self.log.info(f"[{self.username}] Compose textbox not found (pass {pass_num+1}/3) — waiting 5s")
+                time.sleep(5)
 
         self.log.warning(f"[{self.username}] Could not open compose dialog")
         return None

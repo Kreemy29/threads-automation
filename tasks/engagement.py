@@ -155,7 +155,11 @@ def _extract_post_context(bot) -> str:
         // Strategy: find the longest non-trivial text block not inside a nav/button.
         const NOISE = new Set([
             'cancel','reply','add a topic','like','share','follow','following',
-            'see more','translate','report','copy link','embed','quote'
+            'see more','translate','report','copy link','embed','quote',
+            // Threads navigation / chrome UI that leaks into text extraction
+            'for you','search','messages','activity','pro','home','profile',
+            'notifications','explore','some replies have been hidden','see all',
+            'threads','log in','sign up','create account',
         ]);
 
         function cleanText(el) {
@@ -231,10 +235,19 @@ def _extract_post_context(bot) -> str:
         return ""
 
 
+_NAV_WORDS = {"for you", "search", "messages", "activity", "home", "profile",
+              "notifications", "explore", "log in", "sign up"}
+
 def _generate_ai_comment(api_key: str, context: str):
     """Call Grok to generate a short, natural comment based on post context."""
     if not api_key or not context:
         return None
+
+    # Reject context that looks like nav chrome rather than a real post
+    post_part = context.split("\n")[0].replace("Post:", "").strip().lower()
+    nav_hits = sum(1 for w in _NAV_WORDS if w in post_part)
+    if len(post_part) < 20 or nav_hits >= 2:
+        return None  # caller will use fallback comment
 
     prompt = (
         "You are a real 22-year-old LA girl leaving a comment on someone's Threads post. "
@@ -308,7 +321,6 @@ def run_outreach_comments(bot, already_done_today: int, api_key: str = None):
         try:
             post_url = _get_recent_post_url(bot, target_url)
             if not post_url:
-                log.warning(f"[{bot.username}] No recent post at {target_url}")
                 continue
 
             # Scan commenters and follow American-looking ones
@@ -364,15 +376,56 @@ def _follow_american_commenters(bot, post_url: str, api_key: str, log):
 
 def _get_recent_post_url(bot, profile_url: str):
     bot.go(profile_url)
-    time.sleep(2)
+
+    # Wait for at least one post article to appear (profiles lazy-load posts)
     try:
-        links = bot.driver.find_elements(
-            By.XPATH, '//a[contains(@href,"/post/") or contains(@href,"/t/")]'
+        WebDriverWait(bot.driver, 10).until(
+            EC.presence_of_element_located((By.XPATH,
+                '//article | //div[@data-pressable-container] | //a[contains(@href,"/post/")]'
+            ))
         )
-        if links:
-            return links[0].get_attribute("href")
     except Exception:
         pass
+    time.sleep(random.uniform(2, 3))
+
+    # Strategy 1: JS sweep — most reliable across DOM variants
+    def _js_find():
+        return bot.driver.execute_script("""
+            const anchors = Array.from(document.querySelectorAll('a[href]'));
+            for (const a of anchors) {
+                const h = a.href || '';
+                // Must be a post URL with a real post ID (not just a profile link)
+                if (h.includes('/post/') && h.split('/post/')[1].length > 3) return h;
+            }
+            // Debug: what hrefs exist?
+            const sample = anchors.map(a => a.href).filter(Boolean).slice(0, 25);
+            return 'debug:' + JSON.stringify(sample);
+        """)
+
+    result = _js_find()
+    if result and not result.startswith('debug:'):
+        return result
+
+    if result and result.startswith('debug:'):
+        bot.log.debug(f"[{bot.username}] No /post/ links on {profile_url} — hrefs: {result[6:120]}")
+
+    # Strategy 2: scroll and retry (some profiles need a scroll to render posts)
+    try:
+        bot.driver.execute_script("window.scrollBy(0, 500);")
+        time.sleep(2.5)
+        result = _js_find()
+        if result and not result.startswith('debug:'):
+            return result
+        # One more scroll attempt
+        bot.driver.execute_script("window.scrollBy(0, 500);")
+        time.sleep(2)
+        result = _js_find()
+        if result and not result.startswith('debug:'):
+            return result
+    except Exception:
+        pass
+
+    bot.log.warning(f"[{bot.username}] No recent post at {profile_url}")
     return None
 
 

@@ -73,7 +73,11 @@ def _load_tier1_users():
     if not os.path.exists(path):
         return []
     with open(path, "r", encoding="utf-8") as f:
-        return [line.strip().lstrip("@") for line in f if line.strip()]
+        return [
+            line.strip().lstrip("@")
+            for line in f
+            if line.strip() and not line.strip().startswith("#")
+        ]
 
 
 # ------------------------------------------------------------------
@@ -257,118 +261,52 @@ def _run_active_loop(bot, username, log, media_folder: str = ""):
 # Task queue builder — every account gets its own randomized queue
 # ------------------------------------------------------------------
 
-# Slot share per task type (must sum to ~1.0).  Used to allocate slots
-# proportionally so every cycle has a mix of action types instead of
-# being dominated by whichever type has the most candidates.
-_TASK_MIX = {
-    "post":     0.30,
-    "like":     0.25,
-    "follow":   0.18,
-    "comment":  0.12,
-    "scroll":   0.15,
-}
-
-# When trimming extras (count > 1), reduce in this order
-_TRIM_ORDER = ["scroll", "post", "like", "follow", "comment"]
-
-
 def _build_task_queue(cycle_num: int, tier1_users: list, media_folder: str,
                       cycle_secs: int) -> list:
     """
-    Build a flat list of micro-tasks sized to fit within `cycle_secs`,
-    with a balanced mix across all action types.  Each account's queue
-    is independently randomized — counts, order, and timing all differ.
+    Build a flat list of micro-tasks driven directly by settings values.
+    TEXT_POSTS_PER_CYCLE, OUTREACH_COMMENTS_MIN/MAX, ACTIVE_LIKES_MIN/MAX,
+    and FOLLOW_BATCH_SIZE all come from presets/active.json via config.py.
     """
+    from config import GHOST_POSTS_PER_CYCLE, IMAGE_POST
 
-    # ── How many task slots fit? ───────────────────────────────────
-    # Tasks spaced ~2–4 min apart; at least 5 slots so we always get
-    # post + like + follow + comment + something extra.
-    avg_gap_secs = random.randint(120, 240)
-    n_slots = max(5, cycle_secs // avg_gap_secs)
-
-    # ── Allocate slots per task type ──────────────────────────────
-    counts = {k: max(1, round(n_slots * share)) for k, share in _TASK_MIX.items()}
-    if not tier1_users:
-        counts["follow"] = 0
-
-    include_unfollow = True
-
-    # ── Trim to fit n_slots ───────────────────────────────────────
-    # Drop in tiers: extras → unfollow_check → scroll → core engagement.
-    # This keeps the four core actions (post, like, follow, comment)
-    # whenever possible.
-    def total():
-        return sum(counts.values()) + (1 if include_unfollow else 0)
-
-    while total() > n_slots:
-        # 1. Trim any task type that has > 1 (extras)
-        trimmed = False
-        for k in _TRIM_ORDER:
-            if counts.get(k, 0) > 1:
-                counts[k] -= 1
-                trimmed = True
-                break
-        if trimmed:
-            continue
-
-        # 2. Drop unfollow_check
-        if include_unfollow:
-            include_unfollow = False
-            continue
-
-        # 3. Drop scroll (last optional item)
-        if counts.get("scroll", 0) > 0:
-            counts["scroll"] = 0
-            continue
-
-        # 4. Last resort — drop one core engagement type
-        for k in ["post", "follow", "like", "comment"]:
-            if counts.get(k, 0) > 0:
-                counts[k] = 0
-                break
-        else:
-            break
-
-    # ── Materialize tasks ──────────────────────────────────────────
     tasks = []
 
-    # Posts (split between text, image, and ghost)
-    from config import GHOST_POSTS_PER_CYCLE
-    n_post = counts.get("post", 0)
-    n_ghost = min(n_post, GHOST_POSTS_PER_CYCLE or 0)
-    remaining_post = n_post - n_ghost
-    n_image = 1 if remaining_post >= 2 else 0
-    n_text  = min(remaining_post - n_image, TEXT_POSTS_PER_CYCLE)
-    for i in range(n_text):
+    # ── Text posts ────────────────────────────────────────────────
+    for i in range(TEXT_POSTS_PER_CYCLE):
         tasks.append({"type": "post_text", "label": f"text post {i + 1}"})
-    if n_image:
+
+    # ── Image post ────────────────────────────────────────────────
+    if IMAGE_POST:
         tasks.append({"type": "post_image", "label": "image post"})
-    for i in range(n_ghost):
+
+    # ── Ghost posts ───────────────────────────────────────────────
+    for i in range(GHOST_POSTS_PER_CYCLE or 0):
         tasks.append({"type": "post_ghost", "label": f"ghost post {i + 1}"})
 
-    for _ in range(counts.get("like", 0)):
+    # ── Like sessions — one per ~10 min of session, min 1 ────────
+    n_like = max(1, cycle_secs // 600)
+    for _ in range(n_like):
         n = random.randint(ACTIVE_LIKES_MIN, max(ACTIVE_LIKES_MIN, ACTIVE_LIKES_MAX))
         tasks.append({"type": "like", "label": f"like {n} posts", "count": n})
 
-    if counts.get("follow", 0) > 0 and tier1_users:
-        n_follow = counts["follow"]
-        sample_size = min(n_follow * 3, len(tier1_users))
-        pool_users = random.sample(tier1_users, sample_size)
-        for _ in range(n_follow):
-            if not pool_users:
-                break
-            size = random.randint(1, min(3, len(pool_users)))
-            batch = pool_users[:size]
-            pool_users = pool_users[size:]
-            tasks.append({"type": "follow", "label": f"follow {size} user(s)", "users": batch})
+    # ── Follow batches — use tier1_users from settings ────────────
+    if tier1_users:
+        # Split into 1–3 batches across the session
+        n_follow_batches = max(1, min(3, len(tier1_users) // 5))
+        pool = random.sample(tier1_users, min(FOLLOW_BATCH_SIZE, len(tier1_users)))
+        batch_size = max(1, len(pool) // n_follow_batches)
+        for b in range(n_follow_batches):
+            batch = pool[b * batch_size:(b + 1) * batch_size]
+            if batch:
+                tasks.append({"type": "follow", "label": f"follow {len(batch)} user(s)", "users": batch})
 
-    for i in range(counts.get("comment", 0)):
+    # ── Outreach comments — respect comments_min/max setting ──────
+    n_comments = random.randint(OUTREACH_COMMENTS_MIN, max(OUTREACH_COMMENTS_MIN, OUTREACH_COMMENTS_MAX))
+    for i in range(n_comments):
         tasks.append({"type": "comment", "label": f"comment {i + 1}"})
 
-    for _ in range(counts.get("scroll", 0)):
-        secs = random.randint(20, 60)
-        tasks.append({"type": "scroll", "label": f"scroll {secs}s", "seconds": secs})
-
+    # ── Unfollow check (always once per session) ──────────────────
     tasks.append({"type": "unfollow_check", "label": "unfollow check"})
 
     # ── Distribute fire_at evenly across the cycle window with jitter ──

@@ -15,6 +15,7 @@ MOTHER_REPOST_CTA_FILE = ""
 MOTHER_REPOST_IMAGES_FOLDER = ""
 
 GHOST_POSTS_PER_CYCLE = 0
+IMAGE_POST = True
 
 BATCH_SIZE = 15
 
@@ -84,6 +85,7 @@ if os.path.exists(_active):
         MOTHER_REPOST_CTA_FILE      = _s.get("mother_repost_cta_file", MOTHER_REPOST_CTA_FILE)
         MOTHER_REPOST_IMAGES_FOLDER = _s.get("mother_repost_images_folder", MOTHER_REPOST_IMAGES_FOLDER)
         GHOST_POSTS_PER_CYCLE       = _s.get("ghost_posts_per_cycle", GHOST_POSTS_PER_CYCLE)
+        IMAGE_POST                  = _s.get("image_post", IMAGE_POST)
         BATCH_SIZE             = _s.get("batch_size", BATCH_SIZE)
         if _s.get("adspower_api_key"):
             ADSPOWER_API_KEY   = _s["adspower_api_key"]
