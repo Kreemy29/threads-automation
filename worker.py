@@ -150,6 +150,13 @@ def run_account(username, adspower_id, state=None):
         if state == "active":
             account = db.get_account(username)
             media_folder = account.get("media_folder", "")
+            _t1 = _load_tier1_users()
+            if not _t1:
+                log.warning(
+                    f"[{username}] ⚠ tier1_users.txt has no real usernames — "
+                    "follow tasks will be SKIPPED this session. "
+                    "Add usernames (one per line, no @ symbol) to content/tier1_users.txt"
+                )
             _run_active_loop(bot, username, log, media_folder)
             # Clean exit after session — reset to active so coordinator re-queues
             db.update_account(username, state="active")

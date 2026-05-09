@@ -362,32 +362,25 @@ class ThreadsBot:
         ]
 
         def _js_grab_compose_textbox(self):
-            """JS-based textbox finder that avoids feed/nav containers."""
+            """JS-based textbox finder for the compose area."""
             return self.driver.execute_script("""
-                // 1. activeElement — set by Threads when the compose field is focused
+                // 1. activeElement — Threads focuses the textbox immediately on click
                 const ae = document.activeElement;
                 if (ae && ae !== document.body && ae !== document.documentElement) {
                     const role = ae.getAttribute('role');
                     const ce   = ae.getAttribute('contenteditable');
-                    if (role === 'textbox' || ce === 'true') return ae;
+                    if (role === 'textbox' || (ce === 'true' && ce !== 'false')) return ae;
                 }
 
-                // 2. Walk every contenteditable / textbox div, skipping:
-                //    - nav bars
-                //    - feed post containers (data-pressable-container)
-                //    - things inside a post article (comment reply boxes)
+                // 2. First visible contenteditable / textbox not inside nav or header.
+                // NOTE: Do NOT filter out data-pressable-container or article — the
+                // "What's new?" inline compose area lives inside those containers.
                 const candidates = document.querySelectorAll(
                     '[role="textbox"], [contenteditable="true"]'
                 );
                 for (const el of candidates) {
                     if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
-                    // Skip nav / sidebar items
                     if (el.closest('nav') || el.closest('header')) continue;
-                    // Skip feed post cards (the "reply" inline boxes)
-                    if (el.closest('[data-pressable-container]')) continue;
-                    // Skip comment reply dialogs that are already nested in a post
-                    if (el.closest('article')) continue;
-                    // Must be editable
                     if (el.getAttribute('contenteditable') === 'false') continue;
                     return el;
                 }

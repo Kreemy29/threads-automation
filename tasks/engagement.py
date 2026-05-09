@@ -414,41 +414,56 @@ def _get_recent_post_url(bot, profile_url: str):
         except Exception:
             pass
 
-    # Strategy 3: click the first visible post and capture the resulting URL.
-    # Celebrity profiles often lazy-load posts but the article cards are clickable.
-    try:
-        post_el = bot.driver.execute_script("""
-            // Find the first visible article or post-card container
-            for (const sel of [
-                'article a[href]',
-                '[data-pressable-container] a[href]',
-                'a[href*="/@"][href*="/post"]',
-            ]) {
-                const el = document.querySelector(sel);
-                if (el && el.offsetWidth > 0) return el;
-            }
-            // Broader fallback: any visible anchor that looks post-ish
-            const all = document.querySelectorAll('a[href]');
-            for (const a of all) {
-                const h = a.href || '';
-                if (h.includes('threads.') && h.includes('/@') &&
-                    !h.endsWith('/' + h.split('/@')[1].split('/')[0])) {
-                    if (a.offsetWidth > 0) return a;
+    # Strategy 3: click the first visible article/post-card and capture the URL.
+    # Celebrity profiles virtualise their feed — no hrefs exist until cards render,
+    # but the cards themselves are clickable and navigate to the post page.
+    for _click_try in range(2):
+        try:
+            # Scroll down a bit more to trigger lazy loading before each try
+            if _click_try > 0:
+                bot.driver.execute_script("window.scrollBy(0, 600);")
+                time.sleep(2)
+
+            clicked_url = bot.driver.execute_script("""
+                // Try anchors inside articles first (most precise)
+                for (const sel of [
+                    'article a[href]',
+                    '[data-pressable-container] a[href]',
+                ]) {
+                    const a = document.querySelector(sel);
+                    if (a && a.href && a.offsetWidth > 0) {
+                        a.click();
+                        return 'clicked';
+                    }
                 }
-            }
-            return null;
-        """)
-        if post_el:
-            bot.driver.execute_script("arguments[0].click();", post_el)
-            time.sleep(3)
-            url = bot.driver.current_url
-            if "/post/" in url:
-                return url
-            # Navigate back to profile if we ended up somewhere else
-            bot.go(profile_url)
-            time.sleep(2)
-    except Exception:
-        pass
+                // Fall back: click the article/card element itself
+                for (const sel of ['article', '[data-pressable-container="true"]']) {
+                    const el = document.querySelector(sel);
+                    if (el && el.offsetWidth > 0) {
+                        el.click();
+                        return 'clicked-card';
+                    }
+                }
+                // Debug: list all hrefs present
+                const hrefs = Array.from(document.querySelectorAll('a[href]'))
+                    .map(a => a.href).filter(Boolean).slice(0, 15);
+                return 'none:' + JSON.stringify(hrefs);
+            """)
+
+            if clicked_url and 'clicked' in clicked_url:
+                time.sleep(3)
+                url = bot.driver.current_url
+                if "/post/" in url:
+                    return url
+                # Went somewhere unexpected — log it and go back
+                bot.log.debug(f"[{bot.username}] Click navigated to {url[:80]} (not a post page)")
+                bot.go(profile_url)
+                time.sleep(2)
+            elif clicked_url and clicked_url.startswith('none:'):
+                bot.log.debug(f"[{bot.username}] Profile hrefs: {clicked_url[5:120]}")
+
+        except Exception as e:
+            bot.log.debug(f"[{bot.username}] Strategy 3 click error: {e}")
 
     bot.log.warning(f"[{bot.username}] No recent post at {profile_url}")
     return None
